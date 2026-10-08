@@ -30,7 +30,7 @@ Machine-readable evidence: [cpu_smoke_results.json](cpu_smoke_results.json). Loc
 Reused the existing `vla-adapter` environment solely for this CPU check (Python 3.10.16, PyTorch 2.2.0+cu121, timm 0.9.10); installed no new dependencies. The main runner's supported environment remains the version above.
 
 ```bash
-CUDA_VISIBLE_DEVICES='' /home/miracle04/anaconda3/envs/vla-adapter/bin/python scripts/check_official_encoder.py --random-architecture --device cpu --output docs/official_random_cpu.json
+CUDA_VISIBLE_DEVICES='' python3 scripts/check_official_encoder.py --random-architecture --device cpu --output docs/official_random_cpu.json
 ```
 
 The exact pinned official V-JEPA 2.1 ViT-B encoder, **with random weights**, accepts `[2,3,1,256,256]` and returns `[2,256,768]`. Single-frame versus batched output agrees (maximum absolute difference 0 on this CPU run). Full instantiated encoder parameters: 86,833,152. All eight vendored files have verified SHA256 matches against the pinned source manifest. See [official_random_cpu.json](official_random_cpu.json).

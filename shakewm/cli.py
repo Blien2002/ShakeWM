@@ -11,6 +11,7 @@ from .encoder import MockTeacher, OfficialTeacher
 from .engine import (evaluate, load_checkpoint, make_optimizer, save_checkpoint, seed_all,
                      train_microbatch)
 from .model import ShakeWM
+from .native import import_native, plan_splits
 
 
 def make_teacher(args, config):
@@ -30,6 +31,13 @@ def parser():
     f.add_argument("--image-size", type=int, default=32)
     n = sub.add_parser("fit-norm")
     n.add_argument("--manifest", required=True); n.add_argument("--output", required=True)
+    for name in ["plan-native-splits", "import-native"]:
+        native = sub.add_parser(name)
+        native.add_argument("--source", nargs="+", required=True)
+        native.add_argument("--output", required=True)
+        if name == "import-native":
+            native.add_argument("--split-plan")
+            native.add_argument("--camera", choices=["main", "wrist"], default="main")
     for name in ["cache", "train", "eval"]:
         s = sub.add_parser(name)
         s.add_argument("--config", required=True)
@@ -43,18 +51,29 @@ def parser():
         if name != "cache":
             s.add_argument("--cache", help="Frozen feature cache; omit for online encoding")
             s.add_argument("--normalization", required=True)
+            s.add_argument("--allow-mock-for-contract-test", action="store_true",
+                           help="Explicitly diagnostic only: permit mock features on real recordings")
         if name == "train":
             s.add_argument("--resume")
             s.add_argument("--stop-after", type=int, help="Stop early without changing the configured schedule")
         if name == "eval":
             s.add_argument("--checkpoint", required=True)
-            s.add_argument("--split", choices=["val", "test"], default="test")
+            s.add_argument("--split", choices=["train", "val", "test"], default="test")
             s.add_argument("--no-imu", action="store_true", help="Mask-at-test diagnostic; not independently trained RGB-only")
     return p
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.command == "plan-native-splits":
+        plan = plan_splits(args.source)
+        with Path(args.output).open("x") as f:
+            f.write(json.dumps(plan, indent=2) + "\n")
+        print(json.dumps({"actual_state_counts": plan["actual_state_counts"], "heldout_available": plan["heldout_available"]})); return
+    if args.command == "import-native":
+        manifest, report = import_native(args.source, args.output, args.split_plan, args.camera)
+        print(json.dumps({"episodes": len(manifest["episodes"]), "heldout_available": report["heldout_available"],
+                          "actual_state_counts": report["actual_state_counts"]})); return
     if args.command == "fixtures":
         print(create_synthetic(args.output, args.seconds, args.image_size)); return
     if args.command == "fit-norm":
@@ -77,15 +96,17 @@ def main(argv=None):
         raise ValueError(f"no eligible {split} windows: {dataset.coverage}")
     if dataset.teacher["patches"] != config.model.grid ** 2 or dataset.teacher["feature_dim"] != config.model.feature_dim:
         raise ValueError("teacher/model feature contract mismatch")
-    if not dataset.manifest.get("synthetic", False) and dataset.teacher["kind"].startswith("SYNTHETIC"):
+    mock_on_real = not dataset.manifest.get("synthetic", False) and dataset.teacher["kind"].startswith("SYNTHETIC")
+    if mock_on_real and not args.allow_mock_for_contract_test:
         raise ValueError("mock features require a manifest explicitly marked synthetic")
     model = ShakeWM(config.model).to(args.device)
-    manifest_hash = digest_json(dataset.manifest)
+    manifest_hash = dataset.manifest_hash
     if args.command == "eval":
         saved = load_checkpoint(args.checkpoint, model, config, manifest_hash, dataset.teacher, device=args.device)
         if saved["normalization"] != normalization:
             raise ValueError("checkpoint normalization mismatch")
         report = evaluate(model, dataset, config, args.device, config.train.batch_size, args.no_imu)
+        report.update(split=args.split, heldout=args.split != "train", mock_on_real_contract_test=mock_on_real)
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
         print(json.dumps({k: v for k, v in report.items() if k != "windows"}, allow_nan=False)); return
@@ -107,10 +128,16 @@ def main(argv=None):
     (output / "coverage.json").write_text(json.dumps(dataset.coverage, indent=2) + "\n")
     (output / "provenance.json").write_text(json.dumps({"teacher": dataset.teacher, "manifest_hash": manifest_hash,
         "synthetic": dataset.manifest.get("synthetic", False), "torch": str(torch.__version__),
+        "mock_on_real_contract_test": mock_on_real,
         "device": args.device, "sampler": "uniform windows with replacement; RNG saved"}, indent=2) + "\n")
     finish = min(config.train.steps, args.stop_after) if args.stop_after else config.train.steps
     model.train()
     while step < finish:
+        cuda = torch.device(args.device).type == "cuda"
+        if cuda:
+            torch.cuda.synchronize(args.device)
+            torch.cuda.reset_peak_memory_stats(args.device)
+        step_started = time.perf_counter()
         indices = torch.randint(len(dataset), (config.train.batch_size,), generator=generator).tolist()
         batch = default_collate([dataset[i] for i in indices])
         started = time.perf_counter()
@@ -118,8 +145,14 @@ def main(argv=None):
         metrics = train_microbatch(model, batch, config, args.device)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip, error_if_nonfinite=True)
         optimizer.step(); scheduler.step(); step += 1
+        if cuda:
+            torch.cuda.synchronize(args.device)
         metrics.update(global_step=step, learning_rate=optimizer.param_groups[0]["lr"],
-                       grad_norm=float(norm), seconds=time.perf_counter() - started)
+                       grad_norm=float(norm), seconds=time.perf_counter() - started,
+                       data_seconds=started - step_started, total_step_seconds=time.perf_counter() - step_started)
+        if cuda:
+            metrics.update(peak_allocated_bytes=torch.cuda.max_memory_allocated(args.device),
+                           peak_reserved_bytes=torch.cuda.max_memory_reserved(args.device))
         with (output / "train.jsonl").open("a") as f:
             f.write(json.dumps(metrics, allow_nan=False) + "\n")
         print(json.dumps(metrics, allow_nan=False), flush=True)

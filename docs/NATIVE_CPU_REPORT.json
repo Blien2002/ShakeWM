@@ -1,0 +1,89 @@
+{
+  "scope": "Native simulator-recording ingestion and mock CPU contract test; no real-encoder predictor training or GPU run",
+  "data_origin": "two authorized existing IMU-WM v1 simulator recordings",
+  "recordings": 2,
+  "physical_states": 1,
+  "excitation_seeds": 1,
+  "source_manifest_sha256": [
+    "a8c9457f31e14e0323432f6bc20b017ecbb56e251d7017d9c9a8e1ae6314c3b0",
+    "e973b71f2a707a94d5beeecafcda7446af30094e18d76817b4c7bdededd67313"
+  ],
+  "per_recording": {
+    "duration_seconds": 1.1,
+    "rgb_frames_at_20_hz": 23,
+    "imu_acquisitions_at_200_hz": 220,
+    "live_imu_delivered_before_end": 219,
+    "pending_acquisitions_at_end": 1,
+    "invalid_reset_prefill_samples": 10
+  },
+  "normalization_live_train_samples": 438,
+  "split": "train",
+  "heldout": false,
+  "synthetic_recordings": false,
+  "feature_encoder": "SYNTHETIC_MOCK_NOT_VJEPA",
+  "mock_on_real_contract_test": true,
+  "visual_hz": 10,
+  "production_context_10_eligible_windows": 0,
+  "production_v1_eligible_windows": 0,
+  "diagnostic_context": 3,
+  "diagnostic_horizon": 6,
+  "diagnostic_windows": 14,
+  "diagnostic_first_origin_seconds": 0.4,
+  "diagnostic_valid_target_counts": [
+    14,
+    12,
+    10,
+    8,
+    6,
+    4
+  ],
+  "diagnostic_train_steps": 3,
+  "checkpoint_resume": "saved at step 1, resumed to step 3",
+  "diagnostic_horizon_1_feature_l1": 0.5725,
+  "diagnostic_horizon_1_copy_last_feature_l1": 0.001929,
+  "diagnostic_metrics_scope": "Post-review rerun on the execution task; train-only mock contract diagnostic; rounded metric values.",
+  "metric_values_are_rounded": true,
+  "claim": "Contract execution evidence only; predictor is worse than copy-last in this tiny diagnostic run",
+  "pytest_before_final_review_fixes": {
+    "passed": 34,
+    "failed": 0,
+    "seconds": 1.7
+  },
+  "final_review_regressions": {
+    "status": "passed_targeted",
+    "targeted_tests_passed": 4,
+    "added_tests": 3,
+    "cases": [
+      "equivalent quaternion/pose labels",
+      "external plan summary recomputation",
+      "reindexed modified feature cache checkpoint rejection",
+      "raw-data content checkpoint rejection"
+    ],
+    "evidence": "Parent execution task reported four targeted regressions passed; no fresh full-suite run claimed"
+  },
+  "native_mock_rerun_after_final_review_fixes": "cache/train/resume/eval interface passed, as reported by parent execution task",
+  "synthetic_cpu_regression": "V0, RGB-only, V1, resume and online mock completed before final gate-script change",
+  "gpu_executed": false,
+  "real_checkpoint_cpu": {
+    "checkpoint_sha256": "848a77c33cc9e6649ed2119c9bea1e2c569bcdab9539ff3e7c02ccc2959ddf4d",
+    "checkpoint_bytes": 1664223428,
+    "ema_encoder_tensor_entries": 158,
+    "strict_load": true,
+    "shape": [
+      2,
+      256,
+      768
+    ],
+    "finite": true,
+    "batch_consistency_gate_passed": false,
+    "batch_consistency_atol": 2e-05,
+    "batch_consistency_rtol": 0.0002,
+    "mismatched_elements": 2,
+    "total_elements": 393216,
+    "largest_reported_mismatch_abs": 5.4076313972473145e-05,
+    "torch": "2.7.1+cu126",
+    "device": "cpu",
+    "note": "Previously recorded partial CPU check, not a passed official-encoder gate. The revised diagnostic-writing script was not rerun against the checkpoint in this execution task."
+  },
+  "further_test_status": "Canceled at user request; no remote source upload or GPU test. No additional numerical diagnostic was run; revised diagnostic-writer behavior remains unverified against the checkpoint."
+}

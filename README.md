@@ -98,3 +98,8 @@ python -m shakewm.cli eval --config configs/v0.json --manifest /mnt/large/imu_wm
 [CPU 测试报告](docs/CPU_TEST_REPORT.md) 与 [上游说明](third_party/NOTICE.md) 列明已验证范围。当前未实现 ROI、物理 probe、slot、pixel decoder、V2 相位分支；这些不属于本轮全图 toy。模型入口没有动作、seed、scenario、GT pose 或未来强制条件。
 
 新代码采用 MIT。上游文件保留原版权及许可证；没有复制其他私有项目，没有上传数据、checkpoint 或凭据。
+
+<!-- native-import-revision -->
+## Native recording importer and execution handoff
+
+Direct `shakebench.imu_wm.v1` import is now supported. The normalized episode contract remains the model interface. See [native import and CPU evidence](docs/NATIVE_IMPORT.md), [exact commands](docs/EXECUTION_HANDOFF.md), and [official-checkpoint verification status](docs/GPU_HANDOFF.md). The existing recordings provide train-only mock diagnostics; the pretrained encoder numerical gate remains failed and GPU execution is untested.

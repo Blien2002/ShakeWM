@@ -14,12 +14,15 @@ def read_manifest(path):
         raise ValueError("expected shakewm.manifest.v1")
     if manifest.get("source_schema") != "shakebench.imu_wm.v1":
         raise ValueError("source schema must explicitly identify IMU-WM v1")
-    ids, states, seeds = set(), {}, {}
+    ids, states, seeds, fingerprints = set(), {}, {}, {}
     for e in manifest["episodes"]:
         if e["id"] in ids or e["split"] not in {"train", "val", "test"}:
             raise ValueError("duplicate episode id or invalid split")
         ids.add(e["id"])
-        for key, groups in [("state_id", states), ("seed", seeds)]:
+        split_keys = [("state_id", states), ("seed", seeds)]
+        if "state_fingerprint" in e:
+            split_keys.append(("state_fingerprint", fingerprints))
+        for key, groups in split_keys:
             value = str(e[key])
             if value in groups and groups[value] != e["split"]:
                 raise ValueError(f"{key} leaks across splits: {value}")
@@ -28,6 +31,11 @@ def read_manifest(path):
             raise ValueError("invalid attempts belong in the audit ledger, not a training manifest")
         if not (path.parent / e["path"]).is_file():
             raise FileNotFoundError(e["path"])
+        resolved = (path.parent / e["path"]).resolve()
+        if not resolved.is_relative_to(path.parent):
+            raise ValueError("episode path escapes manifest directory")
+        if "source_sha256" in e and file_sha256(resolved) != e["source_sha256"]:
+            raise ValueError("normalized episode source_sha256 mismatch")
     return manifest, path.parent
 
 
@@ -90,10 +98,12 @@ def fit_normalization(manifest_path):
     total = np.zeros(6, np.float64)
     squares = total.copy()
     count = 0
+    train_sources = {}
     for row in manifest["episodes"]:
         if row["split"] != "train":
             continue
         e = load_episode(root / row["path"])
+        train_sources[row["id"]] = file_sha256(root / row["path"])
         keep = e["imu_live"] & (e["imu_acquisition_time"] >= 0) & (e["imu_delivery_time"] <= float(e["end_time"]))
         x = e["imu"][keep].astype(np.float64)
         total += x.sum(0)
@@ -104,7 +114,7 @@ def fit_normalization(manifest_path):
     mean = total / count
     std = np.sqrt(np.maximum(squares / count - mean * mean, 1e-12))
     return {"mean": mean.tolist(), "std": std.tolist(), "count": count,
-            "split_hash": digest_json(manifest), "source": "train_live_only"}
+            "split_hash": digest_json(manifest), "source": "train_live_only", "train_sources": train_sources}
 
 
 class WindowDataset(Dataset):
@@ -113,6 +123,14 @@ class WindowDataset(Dataset):
         self.config, self.normalization = config, normalization
         if normalization["split_hash"] != digest_json(self.manifest):
             raise ValueError("normalization belongs to a different split manifest")
+        sources = {r["id"]: file_sha256(self.root / r["path"]) for r in self.manifest["episodes"]}
+        train_sources = {r["id"]: sources[r["id"]] for r in self.manifest["episodes"] if r["split"] == "train"}
+        if "train_sources" not in normalization:
+            raise ValueError("normalization predates data-content binding; rerun fit-norm")
+        if normalization["train_sources"] != train_sources:
+            raise ValueError("train data changed since normalization")
+        if self.manifest.get("camera", config.camera) != config.camera:
+            raise ValueError("manifest camera differs from configured input camera")
         if (cache_dir is None) == (encoder is None):
             raise ValueError("select exactly one of feature cache or online encoder")
         self.encoder, self.episodes, self.windows = encoder, [], []
@@ -124,6 +142,12 @@ class WindowDataset(Dataset):
             if digest_json(cache["teacher"]) != cache["teacher_hash"]:
                 raise ValueError("cache teacher contract is corrupt")
         self.teacher = cache["teacher"] if cache else encoder.contract
+        # Bind the exact feature-source contract as well as raw episode content.
+        # A reindexed modified cache must not silently resume an older run.
+        # Online/cache mode changes require a new run rather than weakening provenance.
+        self.manifest_hash = digest_json({"manifest": self.manifest, "episode_sha256": sources,
+                                          "feature_source": cache if cache else {
+                                              "kind": "online", "teacher": self.teacher}})
         seen = candidates = short_ok = long_ok = 0
         for row in self.manifest["episodes"]:
             if row["split"] != split:
