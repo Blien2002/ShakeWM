@@ -1,0 +1,260 @@
+{
+  "date": "2026-10-08",
+  "device": "cpu",
+  "synthetic": true,
+  "pretrained_weights_tested": false,
+  "gpu_tested": false,
+  "native_collector_adapter_tested": false,
+  "unit_tests": {
+    "passed": 23,
+    "seconds": 1.34
+  },
+  "environment": {
+    "python": "3.13.5",
+    "torch": "2.9.1+cu128",
+    "numpy": "1.26.4",
+    "pytest": "8.3.4"
+  },
+  "production_predictor_parameters": 204242688,
+  "models": {
+    "v0": {
+      "teacher": {
+        "kind": "SYNTHETIC_MOCK_NOT_VJEPA",
+        "version": 1,
+        "patches": 4,
+        "feature_dim": 8,
+        "grid": 2,
+        "preprocessing": "RGB float [0,1]; adaptive average pool"
+      },
+      "coverage": {
+        "episodes_total": 1,
+        "episodes_eligible": 1,
+        "candidate_windows": 38,
+        "short_eligible": 37,
+        "long_eligible": 8,
+        "selected_windows": 37,
+        "eligibility": "v0"
+      },
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "seconds": 0.1,
+          "count": 37,
+          "latent_l1": 0.5597642064094543,
+          "copy_last_l1": 0.007344426121562719
+        },
+        {
+          "horizon": 2,
+          "seconds": 0.2,
+          "count": 36,
+          "latent_l1": 0.5256280303001404,
+          "copy_last_l1": 0.014689643867313862
+        },
+        {
+          "horizon": 3,
+          "seconds": 0.3,
+          "count": 35,
+          "latent_l1": 0.5062678456306458,
+          "copy_last_l1": 0.022035693749785423
+        },
+        {
+          "horizon": 4,
+          "seconds": 0.4,
+          "count": 34,
+          "latent_l1": 0.4969367980957031,
+          "copy_last_l1": 0.029380111023783684
+        },
+        {
+          "horizon": 5,
+          "seconds": 0.5,
+          "count": 33,
+          "latent_l1": 0.4910128116607666,
+          "copy_last_l1": 0.036723945289850235
+        },
+        {
+          "horizon": 6,
+          "seconds": 0.6,
+          "count": 32,
+          "latent_l1": 0.48564237356185913,
+          "copy_last_l1": 0.04406818747520447
+        }
+      ],
+      "optimizer_steps": 3,
+      "last_train_metrics": {
+        "tf_l1": 0.5843901634216309,
+        "weighted_rollout_l1": 0.5340465903282166,
+        "tf_valid": 6,
+        "rollout_valid": 12,
+        "tf_context_lengths": [
+          1,
+          2,
+          3
+        ],
+        "global_step": 3,
+        "learning_rate": 0.0,
+        "grad_norm": 6.110738754272461,
+        "seconds": 0.02438977302517742
+      }
+    },
+    "rgb_only": {
+      "teacher": {
+        "kind": "SYNTHETIC_MOCK_NOT_VJEPA",
+        "version": 1,
+        "patches": 4,
+        "feature_dim": 8,
+        "grid": 2,
+        "preprocessing": "RGB float [0,1]; adaptive average pool"
+      },
+      "coverage": {
+        "episodes_total": 1,
+        "episodes_eligible": 1,
+        "candidate_windows": 38,
+        "short_eligible": 37,
+        "long_eligible": 8,
+        "selected_windows": 37,
+        "eligibility": "v0"
+      },
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "seconds": 0.1,
+          "count": 37,
+          "latent_l1": 0.5781357884407043,
+          "copy_last_l1": 0.007344426121562719
+        },
+        {
+          "horizon": 2,
+          "seconds": 0.2,
+          "count": 36,
+          "latent_l1": 0.5310038328170776,
+          "copy_last_l1": 0.014689643867313862
+        },
+        {
+          "horizon": 3,
+          "seconds": 0.3,
+          "count": 35,
+          "latent_l1": 0.505689799785614,
+          "copy_last_l1": 0.022035693749785423
+        },
+        {
+          "horizon": 4,
+          "seconds": 0.4,
+          "count": 34,
+          "latent_l1": 0.496635764837265,
+          "copy_last_l1": 0.029380111023783684
+        },
+        {
+          "horizon": 5,
+          "seconds": 0.5,
+          "count": 33,
+          "latent_l1": 0.490754097700119,
+          "copy_last_l1": 0.036723945289850235
+        },
+        {
+          "horizon": 6,
+          "seconds": 0.6,
+          "count": 32,
+          "latent_l1": 0.485542893409729,
+          "copy_last_l1": 0.04406818747520447
+        }
+      ],
+      "optimizer_steps": 3,
+      "last_train_metrics": {
+        "tf_l1": 0.60024493932724,
+        "weighted_rollout_l1": 0.535447932779789,
+        "tf_valid": 6,
+        "rollout_valid": 12,
+        "tf_context_lengths": [
+          1,
+          2,
+          3
+        ],
+        "global_step": 3,
+        "learning_rate": 0.0,
+        "grad_norm": 5.851776123046875,
+        "seconds": 0.0182720220182091
+      }
+    },
+    "v1": {
+      "teacher": {
+        "kind": "SYNTHETIC_MOCK_NOT_VJEPA",
+        "version": 1,
+        "patches": 4,
+        "feature_dim": 8,
+        "grid": 2,
+        "preprocessing": "RGB float [0,1]; adaptive average pool"
+      },
+      "coverage": {
+        "episodes_total": 1,
+        "episodes_eligible": 1,
+        "candidate_windows": 38,
+        "short_eligible": 37,
+        "long_eligible": 8,
+        "selected_windows": 8,
+        "eligibility": "v1"
+      },
+      "per_horizon": [
+        {
+          "horizon": 1,
+          "seconds": 0.1,
+          "count": 8,
+          "latent_l1": 0.6140149831771851,
+          "copy_last_l1": 0.007344543933868408
+        },
+        {
+          "horizon": 2,
+          "seconds": 0.2,
+          "count": 7,
+          "latent_l1": 0.4988172650337219,
+          "copy_last_l1": 0.014687334187328815
+        },
+        {
+          "horizon": 3,
+          "seconds": 0.3,
+          "count": 6,
+          "latent_l1": 0.48891961574554443,
+          "copy_last_l1": 0.02203909493982792
+        },
+        {
+          "horizon": 4,
+          "seconds": 0.4,
+          "count": 5,
+          "latent_l1": 0.4876174032688141,
+          "copy_last_l1": 0.029381370171904564
+        },
+        {
+          "horizon": 5,
+          "seconds": 0.5,
+          "count": 4,
+          "latent_l1": 0.4775471091270447,
+          "copy_last_l1": 0.03672671318054199
+        },
+        {
+          "horizon": 6,
+          "seconds": 0.6,
+          "count": 3,
+          "latent_l1": 0.47139742970466614,
+          "copy_last_l1": 0.04407818987965584
+        }
+      ],
+      "optimizer_steps": 3,
+      "last_train_metrics": {
+        "tf_l1": 0.6531246900558472,
+        "weighted_rollout_l1": 0.5626996159553528,
+        "tf_valid": 6,
+        "rollout_valid": 9,
+        "tf_context_lengths": [
+          1,
+          2,
+          3
+        ],
+        "global_step": 3,
+        "learning_rate": 0.0,
+        "grad_norm": 7.236250400543213,
+        "seconds": 0.07182752003427595
+      }
+    }
+  },
+  "cache_streaming_refactor_exact_eval_match": true,
+  "online_mock_train_steps": 1
+}

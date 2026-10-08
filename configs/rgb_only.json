@@ -1,0 +1,38 @@
+{
+  "model": {
+    "feature_dim": 768,
+    "grid": 16,
+    "width": 1024,
+    "depth": 16,
+    "heads": 16,
+    "mlp_ratio": 4,
+    "imu_mode": "none",
+    "activation_checkpoint": true
+  },
+  "data": {
+    "context": 10,
+    "horizon": 10,
+    "visual_hz": 10,
+    "acquisition_hz": 20,
+    "imu_hz": 200,
+    "short_samples": 20,
+    "long_samples": 600,
+    "camera": "third_person",
+    "eligibility": "v0",
+    "window_stride": 1
+  },
+  "train": {
+    "seed": 7,
+    "batch_size": 2,
+    "steps": 10000,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.04,
+    "warmup_steps": 1000,
+    "tbptt": 4,
+    "imu_dropout": 0.25,
+    "tf_weight": 1.0,
+    "rollout_weight": 1.0,
+    "bf16": true,
+    "grad_clip": 1.0
+  }
+}

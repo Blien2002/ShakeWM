@@ -1,0 +1,14 @@
+{
+  "pretrained_checkpoint": false,
+  "shape": [
+    2,
+    256,
+    768
+  ],
+  "parameters": 86833152,
+  "device": "cpu",
+  "max_batch_error": 0.0,
+  "upstream_commit": "204698b45b3712590f06245fbfba32d3be539812",
+  "torch": "2.2.0+cu121",
+  "teacher": null
+}
