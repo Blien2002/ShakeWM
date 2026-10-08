@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ShakeWM: synthetic train (CPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "/home/miracle04/anaconda3/bin/python",
+      "module": "shakewm.cli",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "args": [
+        "train",
+        "--config", "configs/smoke.json",
+        "--manifest", "data/synthetic/manifest.json",
+        "--normalization", "data/synthetic/norm.json",
+        "--cache", "cache/smoke",
+        "--output", "${input:shakewmRunDir}",
+        "--stop-after", "1",
+        "--device", "cpu"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "shakewmRunDir",
+      "type": "promptString",
+      "description": "训练输出目录（每次调试请选新目录）",
+      "default": "runs/vscode-debug"
+    }
+  ]
+}
