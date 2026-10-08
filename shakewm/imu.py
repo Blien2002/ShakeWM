@@ -3,6 +3,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+SHORT_SAMPLES = 20
+LONG_SAMPLES = 600
+LONG_STRIDE = 4
+LONG_FIR_TAPS = 31  # Hamming-windowed sinc, 20 Hz cutoff at 200 Hz; causal group delay 15 samples = 75 ms
+
 
 class CausalConv(nn.Conv1d):
     def forward(self, x):
@@ -11,14 +16,29 @@ class CausalConv(nn.Conv1d):
 
 
 class AttentionPool(nn.Module):
-    def __init__(self):
+    """Single-query attention pooling that keeps time order.
+
+    A learned position embedding is added to keys and values, so the pooled vector can encode
+    *when* inside the window a feature occurred (phase, time since the last impact). The newest
+    time step, whose causal receptive field covers the whole window, is merged in explicitly.
+    """
+
+    def __init__(self, length):
         super().__init__()
+        self.length = length
         self.query = nn.Parameter(torch.zeros(1, 1, 128))
+        self.position = nn.Parameter(torch.zeros(1, length, 128))
+        nn.init.normal_(self.position, std=0.02)
         self.attention = nn.MultiheadAttention(128, 4, batch_first=True)
+        self.merge = nn.Linear(256, 128)
 
     def forward(self, x):
+        if x.shape[1] != self.length:
+            raise ValueError(f"expected {self.length} time steps, got {x.shape[1]}")
         # Only complete eligible windows reach a branch; no padded sample is pooled.
-        return self.attention(self.query.expand(x.shape[0], -1, -1), x, x, need_weights=False)[0][:, 0]
+        keys = x + self.position.to(x.dtype)
+        pooled = self.attention(self.query.expand(x.shape[0], -1, -1), keys, keys, need_weights=False)[0][:, 0]
+        return self.merge(torch.cat([pooled, x[:, -1]], -1))
 
 
 class ShortEncoder(nn.Module):
@@ -28,7 +48,7 @@ class ShortEncoder(nn.Module):
         for cin, cout, dilation in [(6, 64, 1), (64, 128, 2), (128, 128, 4)]:
             layers += [CausalConv(cin, cout, 5, dilation=dilation), nn.GELU()]
         self.net = nn.Sequential(*layers)
-        self.pool = AttentionPool()
+        self.pool = AttentionPool(SHORT_SAMPLES)
 
     def forward(self, x):
         return self.pool(self.net(x.transpose(1, 2)).transpose(1, 2))
@@ -45,19 +65,24 @@ class ResidualTCN(nn.Module):
 
 
 class LongEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, taps=LONG_FIR_TAPS):
         super().__init__()
-        # 63-tap Hamming-windowed sinc, cutoff 20 Hz at 200 Hz. Causal delay 155 ms.
-        n = torch.arange(63, dtype=torch.float32) - 31
-        taps = 0.2 * torch.sinc(0.2 * n) * torch.hamming_window(63, periodic=False)
-        self.register_buffer("fir", (taps / taps.sum()).repeat(6, 1, 1))
+        # Hamming-windowed sinc, cutoff 20 Hz at 200 Hz, applied causally before stride-4 decimation.
+        # 31 taps keep >0.99 gain up to 9 Hz (all ShakeBench excitation lines) and <0.01 above 30 Hz,
+        # with half the delay of a 63-tap filter (75 ms instead of 155 ms).
+        n = torch.arange(taps, dtype=torch.float32) - (taps - 1) / 2
+        weights = 0.2 * torch.sinc(0.2 * n) * torch.hamming_window(taps, periodic=False)
+        self.register_buffer("fir", (weights / weights.sum()).repeat(6, 1, 1))
         self.input = nn.Sequential(nn.Conv1d(6, 64, 1), nn.GELU(), nn.Conv1d(64, 128, 1))
         self.blocks = nn.Sequential(*(ResidualTCN(d) for d in [1, 2, 4, 8, 16, 32]))
-        self.pool = AttentionPool()
+        self.pool = AttentionPool(LONG_SAMPLES // LONG_STRIDE)
 
     def forward(self, x):
         x = x.transpose(1, 2)
-        x = F.conv1d(F.pad(x, (62, 0)), self.fir.to(x.dtype), groups=6)[..., ::4]
+        taps = self.fir.shape[-1]
+        x = F.conv1d(F.pad(x, (taps - 1, 0)), self.fir.to(x.dtype), groups=6)
+        # Decimate so that the last kept output is the newest sample (indices 3, 7, ..., 599 for 600).
+        x = x[..., (x.shape[-1] - 1) % LONG_STRIDE::LONG_STRIDE]
         return self.pool(self.blocks(self.input(x)).transpose(1, 2))
 
 

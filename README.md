@@ -54,12 +54,14 @@ python -m shakewm.cli eval --config configs/smoke.json --manifest data/toy/manif
 | V0 / V1 / RGB-only | `configs/v0.json` / `v1.json` / `rgb_only.json` |
 | loss | 有效转移全图 feature L1；TF 与 rollout 独立前向及 backward |
 | rollout | 历史一次 prefill，未来两 IMU 槽 NO-IMU；预测回填，不读未来真视觉/IMU |
-| TBPTT | 每 4 步及时 backward，再 detach 预测与所有 K/V；所有段结束后才 optimizer step |
+| TBPTT | 每 4 步及时 backward，再 detach 预测及预测块 K/V；历史视觉与 IMU 的 K/V 保持梯度直到末段；所有段结束后才 optimizer step |
 | optimizer | AdamW，1e-4，weight decay .04，1000-step warmup / cosine，BF16 可选 |
 
 每层按完整时间块调用 SDPA，`is_causal=False` 的查询只得到当前及之前块的 K/V；不构造完整序列注意力矩阵，也不把块语义改为逐 token 因果。cache 仅存在于当前 rollout，最多 C+H−1 块。C16/H10 为 6450 token。正式配置开启 non-reentrant activation checkpoint。
 
-短 IMU：20×6，三层因果卷积（5，dilation 1/2/4，64/128/128）加四头单 query 池化。长 IMU：600×6，63-tap 因果 FIR（20 Hz cutoff，155 ms 群延迟）、stride 4、6 个双卷积残差 TCN（dilation 1…32），池化至 128。左 padding 是网络边界处理，不计作真实观测。生产数据必须满足每个历史步的 live 窗口资格。V0 长槽、RGB-only 两槽均为可学习 NO-IMU；样本级联合 IMU dropout=.25。
+短 IMU：20×6，三层因果卷积（5，dilation 1/2/4，64/128/128）加四头单 query 池化，加入可学习时间位置编码并融合最新时间步。长 IMU：600×6，31-tap 因果 FIR（20 Hz cutoff，75 ms 群延迟）、stride 4（保留最新采样）、6 个双卷积残差 TCN（dilation 1…32），使用相同位置编码与最新时间步融合池化至 128。左 padding 是网络边界处理，不计作真实观测。生产数据必须满足每个历史步的 live 窗口资格。V0 长槽、RGB-only 两槽均为可学习 NO-IMU；样本级联合 IMU dropout=.25。
+
+位置编码、池化融合层和 FIR 尺寸已更新，旧模型 checkpoint 无法严格加载；请新建训练 run。TBPTT 保留历史计算图，因此生产配置的显存需求须重新实测。
 
 ## 官方 encoder 与缓存
 

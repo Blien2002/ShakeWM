@@ -1,4 +1,9 @@
-"""Separate TF and fixed-origin rollout graphs, segmented TBPTT, reproducible state."""
+"""Separate TF and fixed-origin rollout graphs, segmented TBPTT, reproducible state.
+
+Truncation cuts only the autoregressive chain through predicted blocks. The history blocks
+(visual history and IMU tokens) stay attached for the whole rollout, so the loss at every
+horizon, including 0.5-1.0 s, trains the history and IMU pathway.
+"""
 from contextlib import nullcontext
 import math
 from pathlib import Path
@@ -6,7 +11,7 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import default_collate
-from .config import digest_json
+from .model import KVCache
 
 
 def seed_all(seed):
@@ -29,6 +34,19 @@ def precision(device, enabled):
     return torch.autocast(device_type=torch.device(device).type, dtype=torch.bfloat16) if enabled else nullcontext()
 
 
+def truncate_predicted(cache, history_kv, history_tokens):
+    """Detach the K/V of predicted blocks while keeping the history K/V attached.
+
+    ``history_kv`` holds the prefill tensors themselves (not slices of later concatenations), so
+    the graph of the previous segment is not kept alive through them.
+    """
+    layers = []
+    for (hk, hv), (k, v) in zip(history_kv, cache.layers):
+        layers.append((torch.cat([hk, k[..., history_tokens:, :].detach()], -2),
+                       torch.cat([hv, v[..., history_tokens:, :].detach()], -2)))
+    return KVCache(layers, cache.blocks, cache.limit)
+
+
 def train_microbatch(model, batch, config, device, boundary_hook=None):
     t = config.train
     batch = to_device(batch, device)
@@ -47,11 +65,15 @@ def train_microbatch(model, batch, config, device, boundary_hook=None):
     del prediction, tf_cache, tf_loss, weighted_tf
 
     h = config.data.horizon
+    history_tokens = history.shape[1] * (config.model.grid ** 2 + 2)
     with precision(device, t.bf16):
         prefill, cache = model(history, batch["short"], batch["long"], batch["eligible"], dropped,
                                cache_limit=history.shape[1] + h - 1)
         last = prefill[:, -1:]
     del prefill
+    # Prefill K/V of the history blocks (visual history + IMU tokens). They stay attached until the
+    # final segment so that later segments also send gradients into the history and IMU encoder.
+    history_kv = [(k, v) for k, v in cache.layers]
     segment_loss = None
     roll_value = 0.0
     for step in range(h):
@@ -63,16 +85,22 @@ def train_microbatch(model, batch, config, device, boundary_hook=None):
         roll_value += loss.detach().item()
         segment_loss = loss if segment_loss is None else segment_loss + loss
         del loss
-        if (step + 1) % t.tbptt == 0 or step == h - 1:
-            # Backward now, without retain_graph; no parameter update until all segments finish.
-            segment_loss.backward()
-            last = last.detach()
-            cache = cache.detach()
+        final = step == h - 1
+        if (step + 1) % t.tbptt == 0 or final:
+            # Backward each segment now; keep the history graph for later segments. No parameter
+            # update happens until all segments finish (gradients accumulate).
+            segment_loss.backward(retain_graph=not final)
             del segment_loss
             segment_loss = None
+            last = last.detach()
+            if final:
+                cache = cache.detach()
+            else:
+                # Cut the chain through predicted blocks only; history stays attached.
+                cache = truncate_predicted(cache, history_kv, history_tokens)
             if boundary_hook:
                 boundary_hook(step + 1, last, cache)
-    del last, cache
+    del last, cache, history_kv
     return {"tf_l1": tf_value, "weighted_rollout_l1": roll_value,
             "tf_valid": int(tf_count), "rollout_valid": int(roll_count),
             "tf_context_lengths": list(range(1, history.shape[1] + 1))}
