@@ -53,7 +53,7 @@ python -m shakewm.cli eval --config configs/smoke.json --manifest data/toy/manif
 | 时间 | RGB 采集 20 Hz，训练 10 Hz；默认 C=10、H=10，支持修改 C=10–16、H=1–10 |
 | V0 / V1 / RGB-only | `configs/v0.json` / `v1.json` / `rgb_only.json` |
 | loss | 有效转移全图 feature L1；TF 与 rollout 独立前向及 backward |
-| rollout | 历史一次 prefill，未来两 IMU 槽 NO-IMU；预测回填，不读未来真视觉/IMU |
+| rollout | 历史一次 prefill；后续预测使用独立 future IMU 占位 token 回填，不读未来真视觉/IMU |
 | TBPTT | 每 4 步及时 backward，再 detach 预测及预测块 K/V；历史视觉与 IMU 的 K/V 保持梯度直到末段；所有段结束后才 optimizer step |
 | optimizer | AdamW，1e-4，weight decay .04，1000-step warmup / cosine，BF16 可选 |
 

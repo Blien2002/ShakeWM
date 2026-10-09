@@ -144,7 +144,7 @@ class ShakeWM(nn.Module):
         self.visual_out = nn.Linear(config.width, config.feature_dim)
 
     def forward(self, visual, short=None, long=None, eligible=None, dropped=None,
-                cache=None, cache_limit=None, reference=False):
+                cache=None, cache_limit=None, reference=False, future=False):
         """Predict features for input visual blocks and return an updated KV cache.
 
         Args:
@@ -155,6 +155,8 @@ class ShakeWM(nn.Module):
             cache: K/V state from a previous call; `None` starts a prefill.
             cache_limit: maximum total visual blocks, required for a new cache.
             reference: use the explicit attention implementation for parity checks.
+            future: rollout steps after the forecast origin. Both IMU slots get the learned
+                future placeholder; IMU windows are rejected and a history cache is required.
 
         Returns `(predicted_features, cache)`; the prediction shape matches `visual`.
         """
@@ -165,7 +167,9 @@ class ShakeWM(nn.Module):
         limit = cache_limit if cache is None else cache.limit
         if limit is None or offset + t > limit:
             raise ValueError("each call needs a bounded rollout cache (context+horizon-1)")
-        imu = self.imu(b, t, short, long, eligible, dropped)
+        if future and cache is None:
+            raise ValueError("future steps must continue a history cache")
+        imu = self.imu(b, t, short, long, eligible, dropped, future)
         # Flatten in block order: short slot, long slot, then that block's visual patches.
         x = torch.cat([imu, self.visual_in(visual)], 2).flatten(1, 2)
         positions = rope_positions(t, self.config.grid, offset, x.device)
@@ -194,6 +198,6 @@ class ShakeWM(nn.Module):
         last = predicted[:, -1:]
         predictions = [last]
         for _ in range(1, horizon):
-            last, cache = self(last, cache=cache)
+            last, cache = self(last, cache=cache, future=True)
             predictions.append(last)
         return torch.cat(predictions, 1)

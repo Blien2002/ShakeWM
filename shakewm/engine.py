@@ -105,7 +105,7 @@ def train_microbatch(model, batch, config, device, boundary_hook=None):
     for step in range(h):
         if step:
             with precision(device, t.bf16):
-                last, cache = model(last, cache=cache)
+                last, cache = model(last, cache=cache, future=True)
         loss = t.rollout_weight * masked_l1_sum(last, batch["targets"][:, step:step + 1],
                                                batch["target_mask"][:, step:step + 1]) / roll_count
         roll_value += loss.detach().item()

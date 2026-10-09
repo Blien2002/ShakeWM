@@ -115,17 +115,26 @@ class IMUTokens(nn.Module):
         self.long = LongEncoder()
         self.project = nn.ModuleList([nn.Sequential(nn.LayerNorm(128), nn.Linear(128, width)) for _ in range(2)])
         self.kind = nn.Parameter(torch.zeros(2, width))
-        self.no_imu = nn.Parameter(torch.zeros(2, width))
-        nn.init.normal_(self.no_imu, std=0.02)
+        # Missing sensor data and not-yet-observed future data have different meanings.
+        self.missing = nn.Parameter(torch.zeros(2, width))
+        self.future = nn.Parameter(torch.zeros(2, width))
+        nn.init.normal_(self.missing, std=0.02)
+        nn.init.normal_(self.future, std=0.02)
 
-    def forward(self, batch, time, short=None, long=None, eligible=None, dropped=None):
-        """Return `[batch, time, 2, width]` short/long or learned no-IMU tokens.
+    def forward(self, batch, time, short=None, long=None, eligible=None, dropped=None, future=False):
+        """Return `[batch, time, 2, width]` short/long, missing, or future tokens.
 
-        `eligible` and `dropped` decide which input windows are encoded. In v0,
-        the long slot is always inactive; in none mode both slots stay no-IMU.
+        `future=True` marks rollout steps after the forecast origin: both slots get the learned
+        future placeholder and IMU windows are rejected. Otherwise `eligible` and `dropped` decide
+        which input windows are encoded; in v0 the long slot is always missing, and in none mode
+        both slots stay missing.
         """
-        # Start with learned no-IMU placeholders; only complete, enabled windows overwrite them.
-        out = self.no_imu[None, None].expand(batch, time, -1, -1).clone()
+        if future:
+            if short is not None or long is not None:
+                raise ValueError("future rollout steps cannot receive IMU windows")
+            return self.future[None, None].expand(batch, time, -1, -1).clone()
+        # Start with learned missing placeholders; only complete, enabled windows overwrite them.
+        out = self.missing[None, None].expand(batch, time, -1, -1).clone()
         if short is None or self.mode == "none":
             return out
         if eligible is None:
@@ -143,6 +152,6 @@ class IMUTokens(nn.Module):
             if selected.any():
                 if values is None:
                     raise ValueError("eligible IMU window missing")
-                # Encode only active windows; ineligible slots retain their learned no-IMU token.
+                # Encode only active windows; ineligible slots retain their learned missing token.
                 out[:, :, i][selected] = self.project[i](encoder(values[selected])) + self.kind[i]
         return out

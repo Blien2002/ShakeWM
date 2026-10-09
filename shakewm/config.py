@@ -78,7 +78,7 @@ class TrainConfig:
     warmup_steps: int = 1000
     # Number of autoregressive prediction steps between gradient truncations.
     tbptt: int = 4
-    # Per-example probability of replacing both available IMU streams with no-IMU tokens.
+    # Per-example probability of replacing both available IMU streams with missing tokens.
     imu_dropout: float = 0.25
     # Independent weights for teacher-forced and autoregressive latent L1 losses.
     tf_weight: float = 1.0
