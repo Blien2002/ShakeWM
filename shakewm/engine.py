@@ -82,6 +82,7 @@ def train_microbatch(model, batch, config, device, boundary_hook=None):
         # TF predicts the next visual feature at each context position; rollout is scored separately below.
         tf_loss = masked_l1_sum(prediction, batch["tf_targets"], batch["tf_mask"]) / tf_count
         weighted_tf = t.tf_weight * tf_loss
+    # Backpropagate the separate TF objective now; its tensors are released before rollout is built.
     weighted_tf.backward()
     tf_value = tf_loss.detach().item()
     del prediction, tf_cache, tf_loss, weighted_tf
@@ -92,6 +93,7 @@ def train_microbatch(model, batch, config, device, boundary_hook=None):
     with precision(device, t.bf16):
         prefill, cache = model(history, batch["short"], batch["long"], batch["eligible"], dropped,
                                cache_limit=history.shape[1] + h - 1)
+        # The final history block supplies the first forecast; later forecasts are fed back autoregressively.
         last = prefill[:, -1:]
     del prefill
     # Prefill K/V of the history blocks (visual history + IMU tokens). They stay attached until the

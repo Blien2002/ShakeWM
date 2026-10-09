@@ -40,6 +40,7 @@ def rope(x, positions):
     # Split even channels across time/row/column; IMU spatial positions are zero.
     dim = x.shape[-1]
     spatial = 2 * (dim // 6)
+    # Give row and column equal even-sized groups; the remaining even channels encode time.
     sizes = [dim - 2 * spatial, spatial, spatial]
     chunks = []
     for part, pos, size in zip(x.split(sizes, -1), positions.T, sizes):
@@ -104,6 +105,7 @@ class Attention(nn.Module):
                 score = qb.float() @ kb.float().transpose(-1, -2) / (d // self.heads) ** 0.5
                 result = (score.softmax(-1) @ vb.float()).to(q.dtype)
             else:
+                # The K/V slice is already causal, so SDPA needs no token-level causal mask.
                 result = F.scaled_dot_product_attention(qb, kb, vb, is_causal=False)
             outputs.append(result)
         out = torch.cat(outputs, -2).transpose(1, 2).reshape(b, n, d)
@@ -164,6 +166,7 @@ class ShakeWM(nn.Module):
         if limit is None or offset + t > limit:
             raise ValueError("each call needs a bounded rollout cache (context+horizon-1)")
         imu = self.imu(b, t, short, long, eligible, dropped)
+        # Flatten in block order: short slot, long slot, then that block's visual patches.
         x = torch.cat([imu, self.visual_in(visual)], 2).flatten(1, 2)
         positions = rope_positions(t, self.config.grid, offset, x.device)
         updated = []
@@ -174,6 +177,7 @@ class ShakeWM(nn.Module):
             else:
                 x, kv = block(x, positions, old, p + 2, reference)
             updated.append(kv)
+        # IMU slots condition attention but are not forecast targets; return patch outputs only.
         x = self.norm(x).reshape(b, t, p + 2, -1)[:, :, 2:]
         return self.visual_out(x), KVCache(updated, offset + t, limit)
 

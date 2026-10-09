@@ -93,11 +93,13 @@ def imu_window(episode, cutoff, samples, imu_hz=200):
     delivery = episode["imu_delivery_time"]
     live = episode["imu_live"]
     # Delivery field is authoritative; 5 ms is recorded rather than added again.
+    # This cutoff enforces causality: a sample acquired earlier is still hidden until delivered.
     eligible = np.flatnonzero(live & (delivery <= cutoff + 1e-9) &
                              (acquisition >= 0) & (delivery <= float(episode["end_time"]) + 1e-9))
     chosen = eligible[-samples:]
     complete = len(chosen) == samples
     if complete:
+        # Reject stale or irregular windows instead of treating zero padding as sensor evidence.
         complete = (cutoff - delivery[chosen[-1]] < 1 / imu_hz + 1e-7 and
                     np.allclose(np.diff(acquisition[chosen]), 1 / imu_hz, atol=1e-6, rtol=0))
     out = np.zeros((samples, 6), np.float32)
@@ -118,6 +120,7 @@ def fit_normalization(manifest_path):
             continue
         e = load_episode(root / row["path"])
         train_sources[row["id"]] = file_sha256(root / row["path"])
+        # Exclude reset prefill and samples delivered after the episode ends before fitting statistics.
         keep = e["imu_live"] & (e["imu_acquisition_time"] >= 0) & (e["imu_delivery_time"] <= float(e["end_time"]))
         x = e["imu"][keep].astype(np.float64)
         total += x.sum(0)
@@ -258,6 +261,7 @@ class WindowDataset(Dataset):
         mask = torch.zeros(h, dtype=torch.bool)
         mask[:stop-origin-1] = torch.from_numpy(valid[origin + 1:stop].copy())
         # TF uses C true blocks to predict C next frames, with actual context lengths 1..C.
+        # Shift history left by one; the final context position targets the first future frame.
         tf_targets = torch.cat([history[1:], targets[:1]])
         tf_mask = torch.cat([torch.ones(c - 1, dtype=torch.bool), mask[:1]])
         mean = np.asarray(self.normalization["mean"], np.float32)

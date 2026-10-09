@@ -149,6 +149,7 @@ def plan_splits(sources):
             parent[i] = parent[parent[i]]; i = parent[i]
         return i
     for key in ["state_id", "state_fingerprint", "seed"]:
+        # Union repeated identities; transitive links then keep the whole component in one split.
         seen = {}
         for i, row in enumerate(rows):
             value = row[key]
@@ -279,6 +280,7 @@ def read_native(path, camera="main"):
         d = arrays(row["path"])
         n = row["count"]
         require(row["start_index"] == cursor and n > 0, "native IMU chunk gap/order mismatch")
+        # Native chunks begin after the reset prefill; index zero is the first 5 ms acquisition.
         t = (np.arange(n) + cursor + 1) * .005
         close(d["acquisition_time_s"], t, "native IMU acquisition gap/order mismatch")
         close(d["scheduled_delivery_time_s"], t + .005, "scheduled IMU delivery is not +5ms")
@@ -329,6 +331,7 @@ def read_native(path, camera="main"):
         expected_times = count * .005 + np.arange(-10, 0) * .005
         close(d["imu_window_acquisition_time_s"], expected_times, "frame delivery window time mismatch")
         require(np.array_equal(d["imu_window_is_live"], expected_times > 1e-12), "frame reset live mask mismatch")
+        # Rebuild the frame's last ten delivered samples from reset prefill plus causal deliveries.
         expected_window = np.concatenate([initial["window"], imu["delivered_measurement"][:count]])[-10:]
         require(np.array_equal(d["imu_window"], expected_window), "frame values disagree with actual delivery trace")
     for i, row in enumerate(m["frames"]):

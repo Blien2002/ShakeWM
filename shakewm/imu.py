@@ -124,6 +124,7 @@ class IMUTokens(nn.Module):
         `eligible` and `dropped` decide which input windows are encoded. In v0,
         the long slot is always inactive; in none mode both slots stay no-IMU.
         """
+        # Start with learned no-IMU placeholders; only complete, enabled windows overwrite them.
         out = self.no_imu[None, None].expand(batch, time, -1, -1).clone()
         if short is None or self.mode == "none":
             return out
@@ -132,6 +133,7 @@ class IMUTokens(nn.Module):
         # `active[b,t,stream]` means that sample b may encode this IMU stream at time t.
         active = eligible.clone()
         if dropped is not None:
+            # A dropped sample loses both IMU streams at every context step, consistently across objectives.
             active &= ~dropped[:, None, None]
         if self.mode == "v0":
             active[..., 1] = False
@@ -141,5 +143,6 @@ class IMUTokens(nn.Module):
             if selected.any():
                 if values is None:
                     raise ValueError("eligible IMU window missing")
+                # Encode only active windows; ineligible slots retain their learned no-IMU token.
                 out[:, :, i][selected] = self.project[i](encoder(values[selected])) + self.kind[i]
         return out
