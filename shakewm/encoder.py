@@ -8,21 +8,33 @@ from torch import nn
 from torch.nn import functional as F
 from .config import file_sha256
 
+# Immutable V-JEPA 2.1 source revision used to build the official teacher.
 UPSTREAM_COMMIT = "204698b45b3712590f06245fbfba32d3be539812"
 
 
 class FrozenTeacher(nn.Module):
+    """Base class for fixed image encoders that never receive training gradients."""
+
     def train(self, mode=True):
+        """Keep the encoder in evaluation mode even when its parent model trains."""
         return super().train(False)
 
     @torch.no_grad()
     def encode_numpy(self, rgb):
+        """Encode a uint8 NHWC RGB batch and return CPU float features.
+
+        `rgb` has shape `[batch, height, width, 3]`; subclasses return
+        `[batch, patches, feature_dim]`.
+        """
         x = torch.as_tensor(rgb.copy(), device=self.device).permute(0, 3, 1, 2).float() / 255
         return self(x).float().cpu()
 
 
 class MockTeacher(FrozenTeacher):
+    """Deterministic pooled-RGB encoder for synthetic CPU pipeline checks only."""
+
     def __init__(self, grid=2, feature_dim=8, device="cpu"):
+        """Set the synthetic feature grid, channel count, and execution device."""
         super().__init__()
         self.device = torch.device(device)
         self.grid, self.feature_dim = grid, feature_dim
@@ -33,11 +45,13 @@ class MockTeacher(FrozenTeacher):
                          "feature_dim": feature_dim, "grid": grid, "preprocessing": "RGB float [0,1]; adaptive average pool"}
 
     def forward(self, x):
+        """Pool each RGB image into a grid and project its three color channels."""
         pooled = F.adaptive_avg_pool2d(x, (self.grid, self.grid)).flatten(2).transpose(1, 2)
         return pooled @ self.projection
 
 
 def official_architecture(source_root=None):
+    """Instantiate the hash-verified official ViT-B architecture without loading weights."""
     root = Path(source_root) if source_root else Path(__file__).resolve().parents[1] / "third_party/vjepa2"
     if not (root / "app/vjepa_2_1/models/vision_transformer.py").is_file():
         raise FileNotFoundError("official source unavailable; use an editable checkout installation")
@@ -54,6 +68,7 @@ def official_architecture(source_root=None):
 
 
 def clean_state(state):
+    """Remove known wrapper prefixes from checkpoint keys and reject collisions."""
     cleaned = {}
     for original, value in state.items():
         key = original
@@ -67,7 +82,10 @@ def clean_state(state):
 
 
 class OfficialTeacher(FrozenTeacher):
+    """Frozen V-JEPA 2.1 EMA image encoder with strict checkpoint and shape checks."""
+
     def __init__(self, checkpoint_path, device="cpu", expected_sha256=None):
+        """Load the local EMA checkpoint and bind its checksum into the feature contract."""
         super().__init__()
         if checkpoint_path is None:
             raise ValueError("official teacher requires an explicit local official checkpoint")
@@ -90,6 +108,7 @@ class OfficialTeacher(FrozenTeacher):
 
     @torch.no_grad()
     def forward(self, x):
+        """Encode `[B, 3, 256, 256]` RGB tensors into 256 patches of 768 features."""
         if tuple(x.shape[1:]) != (3, 256, 256):
             raise ValueError("official image input must be [B,3,256,256]")
         if not torch.isfinite(x).all() or x.min() < 0 or x.max() > 1:

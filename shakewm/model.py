@@ -8,12 +8,22 @@ from .imu import IMUTokens
 
 
 def block_causal_mask(query_blocks, key_blocks, tokens, offset=0, device=None):
+    """Build a token mask where each query block sees its own and earlier key blocks.
+
+    The returned boolean matrix is `[query_blocks*tokens, key_blocks*tokens]`;
+    `offset` gives the absolute block index of the first query.
+    """
     q = torch.arange(offset, offset + query_blocks, device=device).repeat_interleave(tokens)
     k = torch.arange(key_blocks, device=device).repeat_interleave(tokens)
     return k[None, :] <= q[:, None]
 
 
 def rope_positions(blocks, grid, offset, device):
+    """Create `[time, row, column]` coordinates for IMU slots and visual patches.
+
+    Each visual block has `grid²` row-major patches plus two IMU positions whose
+    row and column coordinates are zero.
+    """
     tokens = grid * grid + 2
     t = torch.arange(offset, offset + blocks, device=device).repeat_interleave(tokens)
     row = torch.cat([torch.zeros(2, device=device), torch.arange(grid, device=device).repeat_interleave(grid)])
@@ -22,6 +32,11 @@ def rope_positions(blocks, grid, offset, device):
 
 
 def rope(x, positions):
+    """Apply 3D rotary position embedding to time/row/column channel groups.
+
+    `x` is `[batch, heads, tokens, head_dim]`; `positions` has one three-axis
+    coordinate per token. The returned tensor keeps the input shape and dtype.
+    """
     # Split even channels across time/row/column; IMU spatial positions are zero.
     dim = x.shape[-1]
     spatial = 2 * (dim // 6)
@@ -38,25 +53,43 @@ def rope(x, positions):
 
 @dataclass
 class KVCache:
+    """Per-layer attention keys/values plus current and maximum block counts.
+
+    `layers[i]` stores the accumulated `(key, value)` tensors for transformer
+    layer i. `blocks` is the current visual-block count; `limit` bounds rollout.
+    """
+
     layers: list
     blocks: int
     limit: int
 
     def detach(self):
+        """Return the same cache metadata with every K/V tensor detached from autograd."""
         return KVCache([(k.detach(), v.detach()) for k, v in self.layers], self.blocks, self.limit)
 
 
 class Attention(nn.Module):
+    """Multi-head self-attention evaluated one complete time block at a time."""
+
     def __init__(self, width, heads):
+        """Create the combined Q/K/V projection and output projection."""
         super().__init__()
         self.heads = heads
         self.qkv = nn.Linear(width, width * 3)
         self.proj = nn.Linear(width, width)
 
     def forward(self, x, positions, old, tokens, reference=False):
+        """Attend each query block to its prefix K/V and return updated layer cache.
+
+        `x` is `[batch, tokens, width]`; `old` is the optional cached `(K,V)` pair.
+        The Q/K/V projections are queries, keys, and values for scaled dot-product attention.
+        When `reference` is true, use explicit float32 attention for parity checks
+        instead of PyTorch's scaled-dot-product kernel.
+        """
         b, n, d = x.shape
         q, k, v = self.qkv(x).reshape(b, n, 3, self.heads, d // self.heads).permute(2, 0, 3, 1, 4)
         q, k = rope(q, positions), rope(k, positions)
+        # Number of cached tokens before this call; used to align each query block's prefix.
         previous = 0 if old is None else old[0].shape[-2]
         if old is not None:
             k, v = torch.cat([old[0], k], -2), torch.cat([old[1], v], -2)
@@ -64,6 +97,7 @@ class Attention(nn.Module):
         # No quadratic full-sequence attention matrix or token-causal approximation.
         outputs = []
         for start in range(0, n, tokens):
+            # `end` includes old tokens and the current query block, but no future block.
             end = previous + start + tokens
             qb, kb, vb = q[..., start:start + tokens, :], k[..., :end, :], v[..., :end, :]
             if reference:
@@ -77,7 +111,10 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
+    """Pre-norm transformer block with residual attention and MLP sublayers."""
+
     def __init__(self, config):
+        """Build normalization, attention, and the configured-width MLP."""
         super().__init__()
         self.norm1, self.norm2 = nn.LayerNorm(config.width), nn.LayerNorm(config.width)
         self.attention = Attention(config.width, config.heads)
@@ -85,13 +122,17 @@ class Block(nn.Module):
                                  nn.Linear(config.width * config.mlp_ratio, config.width))
 
     def forward(self, x, positions, old, tokens, reference=False):
+        """Apply one transformer block and return its updated K/V cache."""
         y, kv = self.attention(self.norm1(x), positions, old, tokens, reference)
         x = x + y
         return x + self.mlp(self.norm2(x)), kv
 
 
 class ShakeWM(nn.Module):
+    """Predict future frozen visual features from visual history and delivered IMU."""
+
     def __init__(self, config):
+        """Build feature projections, IMU tokenizers, transformer blocks, and output head."""
         super().__init__()
         self.config = config
         self.visual_in = nn.Linear(config.feature_dim, config.width)
@@ -102,6 +143,19 @@ class ShakeWM(nn.Module):
 
     def forward(self, visual, short=None, long=None, eligible=None, dropped=None,
                 cache=None, cache_limit=None, reference=False):
+        """Predict features for input visual blocks and return an updated KV cache.
+
+        Args:
+            visual: `[B,T,grid²,feature_dim]` history features or prior predictions.
+            short/long: optional normalized IMU windows `[B,T,20,6]` / `[B,T,600,6]`.
+            eligible: boolean `[B,T,2]` availability for short and long streams.
+            dropped: optional boolean `[B]` joint per-example IMU dropout mask.
+            cache: K/V state from a previous call; `None` starts a prefill.
+            cache_limit: maximum total visual blocks, required for a new cache.
+            reference: use the explicit attention implementation for parity checks.
+
+        Returns `(predicted_features, cache)`; the prediction shape matches `visual`.
+        """
         b, t, p, d = visual.shape
         if (p, d) != (self.config.grid ** 2, self.config.feature_dim):
             raise ValueError("visual feature shape does not match model configuration")
@@ -125,6 +179,11 @@ class ShakeWM(nn.Module):
 
     @torch.no_grad()
     def rollout(self, history, short, long, eligible, horizon, dropped=None):
+        """Generate a fixed-origin open-loop forecast without future sensor inputs.
+
+        The history is prefetched once; each later step feeds the previous feature
+        prediction back with the accumulated cache. Returns `[B,horizon,P,D]`.
+        """
         # Targets and future observations cannot be passed to this API.
         predicted, cache = self(history, short, long, eligible, dropped,
                                 cache_limit=history.shape[1] + horizon - 1)

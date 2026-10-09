@@ -15,6 +15,7 @@ from .native import import_native, plan_splits
 
 
 def make_teacher(args, config):
+    """Construct the configured synthetic or official frozen image encoder."""
     if args.encoder == "mock":
         return MockTeacher(config.model.grid, config.model.feature_dim, args.device)
     if (config.model.grid, config.model.feature_dim) != (16, 768):
@@ -23,6 +24,7 @@ def make_teacher(args, config):
 
 
 def parser():
+    """Define CLI commands and the arguments shared by cache/train/eval."""
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
     f = sub.add_parser("fixtures", help="Create explicitly synthetic sensor fixtures")
@@ -64,6 +66,12 @@ def parser():
 
 
 def main(argv=None):
+    """Dispatch data-preparation commands or run cache, training, and evaluation.
+
+    `argv=None` lets argparse read the process command line; tests and callers may
+    pass an explicit argument list. Training samples windows, updates the predictor,
+    and saves a resumable checkpoint plus JSONL metrics.
+    """
     args = parser().parse_args(argv)
     if args.command == "plan-native-splits":
         plan = plan_splits(args.source)
@@ -88,6 +96,7 @@ def main(argv=None):
         teacher = make_teacher(args, config)
         index = build_cache(args.manifest, args.output, config.data, teacher)
         print(json.dumps({"episodes": len(index["episodes"]), "teacher": index["teacher"]})); return
+    # A cache carries its frozen-teacher contract; online mode constructs the teacher here.
     normalization = json.loads(Path(args.normalization).read_text())
     teacher = None if args.cache else make_teacher(args, config)
     split = "train" if args.command == "train" else args.split
@@ -96,6 +105,7 @@ def main(argv=None):
         raise ValueError(f"no eligible {split} windows: {dataset.coverage}")
     if dataset.teacher["patches"] != config.model.grid ** 2 or dataset.teacher["feature_dim"] != config.model.feature_dim:
         raise ValueError("teacher/model feature contract mismatch")
+    # This guard prevents diagnostic mock features from being mistaken for real V-JEPA inputs.
     mock_on_real = not dataset.manifest.get("synthetic", False) and dataset.teacher["kind"].startswith("SYNTHETIC")
     if mock_on_real and not args.allow_mock_for_contract_test:
         raise ValueError("mock features require a manifest explicitly marked synthetic")
@@ -138,11 +148,13 @@ def main(argv=None):
             torch.cuda.synchronize(args.device)
             torch.cuda.reset_peak_memory_stats(args.device)
         step_started = time.perf_counter()
+        # Sample training-window indices uniformly with replacement using checkpointed RNG state.
         indices = torch.randint(len(dataset), (config.train.batch_size,), generator=generator).tolist()
         batch = default_collate([dataset[i] for i in indices])
         started = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
         metrics = train_microbatch(model, batch, config, args.device)
+        # `norm` is the pre-clipping global gradient norm, recorded for diagnostics.
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.train.grad_clip, error_if_nonfinite=True)
         optimizer.step(); scheduler.step(); step += 1
         if cuda:

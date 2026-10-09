@@ -14,16 +14,19 @@ UNITS = ["m/s2"] * 3 + ["rad/s"] * 3
 
 
 def require(condition, message):
+    """Raise `ValueError` when an imported-data contract is not satisfied."""
     if not condition:
         raise ValueError(message)
 
 
 def close(actual, expected, message):
+    """Require equal array shapes and values within the strict numeric tolerance."""
     a, b = np.asarray(actual), np.asarray(expected)
     require(a.shape == b.shape and np.allclose(a, b, atol=1e-9, rtol=0), message)
 
 
 def safe_file(root, name):
+    """Resolve a manifest-relative file while rejecting absolute/path-escape paths."""
     require(not Path(name).is_absolute(), "absolute native path refused")
     p = (root / name).resolve()
     require(p.is_relative_to(root.resolve()) and p.is_file(), f"unsafe/missing native file: {name}")
@@ -31,6 +34,11 @@ def safe_file(root, name):
 
 
 def canonical_quaternion(values):
+    """Normalize a WXYZ quaternion and choose one stable sign/rounding form.
+
+    A rotation is unchanged by negating all four quaternion components, so the
+    first nonzero component is made positive before fingerprinting the pose.
+    """
     q = np.asarray(values, dtype=np.float64)
     require(q.shape == (4,) and np.isfinite(q).all(), "invalid physical quaternion")
     norm = np.linalg.norm(q)
@@ -46,10 +54,16 @@ def canonical_quaternion(values):
 
 
 def identity(manifest):
+    """Extract split identity and a canonical fingerprint of the physical state.
+
+    Pose is authoritative for physical identity. The returned audit hash still
+    retains the complete original state record, including non-physical labels.
+    """
     meta = manifest["metadata"]
     original = meta.get("original_state", meta["state"])
     state = meta["state"]
     require("state_id" in original and "object_pose_worktable" in original, "state identity/pose missing")
+    # The seven pose values are xyz position followed by a WXYZ quaternion.
     pose = np.asarray(original["object_pose_worktable"], dtype=np.float64)
     require(pose.shape == (7,) and np.isfinite(pose).all(), "invalid physical object pose")
     quaternion = canonical_quaternion(pose[3:])
@@ -65,6 +79,7 @@ def identity(manifest):
         velocity = np.asarray(velocity, dtype=np.float64)
         require(velocity.shape == (6,) and np.isfinite(velocity).all(), "invalid physical initial velocity")
         velocity = [float(v) if v != 0 else 0.0 for v in velocity]
+    # Only physical/task conditions define grouping; the full record is hashed separately for audit.
     physical = {"object_pose_worktable": position + quaternion,
                 "task": original.get("task", {}), "object_initial_velocity": velocity,
                 "grasp_region": original.get("grasp_region")}
@@ -78,6 +93,12 @@ def identity(manifest):
 
 
 def discover(sources):
+    """Find native manifests and separate completed episodes from failure receipts.
+
+    Each returned row includes a checksum-bound source path and canonical state,
+    seed, asset, basis, and scenario identity. Only immediate child directories
+    are searched when a source is a directory without its own manifest.
+    """
     paths = set()
     for source in sources:
         p = Path(source).resolve()
@@ -102,7 +123,10 @@ def discover(sources):
 
 
 def physical_representatives(rows):
-    """Use the first source path consistently when audit labels disagree."""
+    """Keep one deterministic row per physical-state fingerprint.
+
+    The lexicographically first source path is retained if audit labels differ.
+    """
     unique = {}
     for row in sorted(rows, key=lambda r: r["source"]):
         unique.setdefault(row["state_fingerprint"], row)
@@ -110,10 +134,17 @@ def physical_representatives(rows):
 
 
 def plan_splits(sources):
-    """Freeze split groups before windows; shared state, physical state or seed joins groups."""
+    """Freeze train/val/test groups before window creation.
+
+    Episodes connected by state ID, physical fingerprint, or seed stay in one
+    split. The deterministic grouped allocation targets 80/10/10 by unique
+    physical states and reports when an independent held-out split is unavailable.
+    """
     rows, excluded = discover(sources)
+    # `parent` is the union-find table used to join episodes sharing any identity key.
     parent = list(range(len(rows)))
     def find(i):
+        """Return an episode's component root and compress the traversed path."""
         while parent[i] != i:
             parent[i] = parent[parent[i]]; i = parent[i]
         return i
@@ -130,6 +161,7 @@ def plan_splits(sources):
     groups = sorted(components.values(), key=lambda g: (-len({r["state_fingerprint"] for r in g}),
                                                         digest_json(sorted(r["state_fingerprint"] for r in g))))
     total = len({r["state_fingerprint"] for r in rows})
+    # `targets` are desired unique-state counts; `counts` and `strata` track assignments so far.
     targets = {"train": total - 2 * (total // 10), "val": total // 10, "test": total // 10}
     counts = Counter()
     strata = defaultdict(Counter)
@@ -153,7 +185,13 @@ def plan_splits(sources):
 
 
 def validate_plan(plan):
+    """Reject split leakage and recompute every summary from episode assignments.
+
+    This also permits a caller to reassign whole groups without trusting stale
+    counts, held-out flags, or stratum summaries in an external plan file.
+    """
     require(plan.get("schema") == "shakewm.native-split.v1", "unsupported native split plan")
+    # Each map records the first split assigned to a state/seed identity.
     seen = {k: {} for k in ["state_id", "state_fingerprint", "seed"]}
     paths = set()
     for row in plan["episodes"]:
@@ -169,6 +207,7 @@ def validate_plan(plan):
     strata = defaultdict(Counter)
     parent = list(range(len(plan["episodes"])))
     def find(i):
+        """Return and compress the union-find root for split-connected episodes."""
         while parent[i] != i:
             parent[i] = parent[parent[i]]; i = parent[i]
         return i
@@ -194,7 +233,14 @@ def validate_plan(plan):
 
 
 def read_native(path, camera="main"):
+    """Validate one lossless native recording and convert it to normalized arrays.
+
+    `camera` selects the RGB view. The result is `(episode, audit, identity)`;
+    validation checks file hashes, sensor timing/delivery, frame windows, and
+    terminal evidence without importing collector code or rerunning simulation.
+    """
     path = Path(path).resolve()
+    # `m` is the native manifest; `meta` contains the timing, sensor, and camera contracts.
     root, m = path.parent, json.loads(path.read_text())
     require(m.get("schema_id") == "shakebench.imu_wm.v1" and m.get("schema_version") == 1, "unsupported native schema")
     require(m.get("status") == "COMPLETED" and not m.get("failure_reason"), "only completed valid responses are accepted")
@@ -213,6 +259,7 @@ def read_native(path, camera="main"):
     for name, expected in m["files"].items():
         require(file_sha256(safe_file(root, name)) == expected, f"native checksum mismatch: {name}")
     def arrays(name):
+        """Load one checksum-listed NPZ file as a name-to-array mapping."""
         require(name in m["files"], f"native array lacks a manifest checksum: {name}")
         with np.load(safe_file(root, name), allow_pickle=False) as z:
             return {k: z[k] for k in z.files}
@@ -221,10 +268,12 @@ def read_native(path, camera="main"):
     close(initial["acquisition_time_s"], np.arange(-10, 0) * .005, "reset prefill time mismatch")
     require(initial["is_live"].dtype == bool and not initial["is_live"].any(), "reset prefill cannot be live")
     require(initial["window"].shape == (10, 6), "reset window shape mismatch")
+    # Chunk arrays are concatenated by these fields after each chunk's ordering is verified.
     keys = ["acquisition_time_s", "scheduled_delivery_time_s", "delivery_event_time_s",
             "delivered_acquisition_time_s", "acquisition_is_live", "delivered_is_live",
             "acquired_measurement", "delivered_measurement"]
     chunks = {k: [] for k in keys}
+    # `cursor` is the next expected global IMU acquisition index across chunks.
     cursor = 0
     for row in m["imu_chunks"]:
         d = arrays(row["path"])
@@ -247,6 +296,7 @@ def read_native(path, camera="main"):
     require(np.array_equal(imu["delivered_measurement"][1:], imu["acquired_measurement"][:-1]),
             "actual delivered values disagree with preceding acquired values")
 
+    # `term` is optional terminal-state evidence; absent evidence means legacy fixed duration.
     term = m.get("termination")
     planned_steps = meta["timing"]["total_steps"]
     if term:
@@ -271,6 +321,7 @@ def read_native(path, camera="main"):
 
     rgb, times = [], []
     def validate_frame(d, t):
+        """Check a frame's timestamp, RGB payload, and delivered-IMU history window."""
         close(d["time_s"], t, "frame timestamp mismatch")
         require(d["rgb"].shape == (len(order), height, width, 3) and d["rgb"].dtype == np.uint8,
                 "native RGB shape/dtype mismatch")
@@ -312,6 +363,12 @@ def read_native(path, camera="main"):
 
 
 def import_native(sources, output, plan_path=None, camera="main"):
+    """Convert validated native recordings into the normalized episode-manifest format.
+
+    A supplied split plan is revalidated against the discovered source set before
+    any arrays are written. `output` must be a new directory; the return value is
+    the normalized manifest and an audit report, not evidence of physical validity.
+    """
     plan = json.loads(Path(plan_path).read_text()) if plan_path else plan_splits(sources)
     validate_plan(plan)
     if plan_path:

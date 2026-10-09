@@ -9,6 +9,10 @@ from shakewm.encoder import OfficialTeacher, official_architecture, UPSTREAM_COM
 
 
 def main():
+    """Check official encoder loading, output numerics, frozen weights, and batch parity.
+
+    Writes a JSON report to `--output` and exits nonzero if any required gate fails.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     choice = p.add_mutually_exclusive_group(required=True)
     choice.add_argument("--checkpoint")
@@ -25,6 +29,7 @@ def main():
         model = OfficialTeacher(args.checkpoint, args.device, args.sha256)
         x = torch.rand(2, 3, 256, 256, device=args.device)
     with torch.no_grad():
+        # Compare one batched call against concatenated per-image calls.
         actual = model(x)
         singles = torch.cat([model(x[i:i+1]) for i in range(2)])
     shape_ok = actual.shape == (2, 256, 768) and singles.shape == actual.shape

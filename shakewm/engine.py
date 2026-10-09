@@ -15,30 +15,41 @@ from .model import KVCache
 
 
 def seed_all(seed):
+    """Seed Python, NumPy, and Torch so sampling and initialization are reproducible."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
 
 def to_device(batch, device):
+    """Move tensor-valued batch fields to `device`, leaving metadata unchanged."""
     return {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
 
 
 def masked_l1_sum(predicted, target, valid):
+    """Sum per-frame latent L1 errors over valid mask entries only.
+
+    The patch and feature axes are averaged first; `valid` therefore counts
+    supervised frames rather than individual scalar feature values.
+    """
     # Invalid values do not participate, even if a caller supplies NaN padding.
     errors = (predicted.float() - target.detach().float()).abs().mean(dim=(-1, -2))
     return torch.where(valid, errors, torch.zeros_like(errors)).sum()
 
 
 def precision(device, enabled):
+    """Return a bfloat16 autocast context, or a no-op context when disabled."""
     return torch.autocast(device_type=torch.device(device).type, dtype=torch.bfloat16) if enabled else nullcontext()
 
 
 def truncate_predicted(cache, history_kv, history_tokens):
-    """Detach the K/V of predicted blocks while keeping the history K/V attached.
+    """Detach predicted-block K/V while preserving gradient paths through history.
 
     ``history_kv`` holds the prefill tensors themselves (not slices of later concatenations), so
     the graph of the previous segment is not kept alive through them.
+
+    `history_tokens` is the flattened token count in the prefilled history; K/V
+    entries after that boundary belong to autoregressively predicted blocks.
     """
     layers = []
     for (hk, hv), (k, v) in zip(history_kv, cache.layers):
@@ -48,16 +59,27 @@ def truncate_predicted(cache, history_kv, history_tokens):
 
 
 def train_microbatch(model, batch, config, device, boundary_hook=None):
+    """Compute teacher-forced and fixed-origin rollout losses for one microbatch.
+
+    The two objectives run through separate forward/backward graphs. Rollout
+    gradients are truncated every `config.train.tbptt` predicted steps, while
+    history K/V remains attached until the final segment. Returns scalar loss
+    values and the number of valid targets used by each objective.
+    """
     t = config.train
     batch = to_device(batch, device)
+    # `history` has shape [B,C,P,D]: batch, context, patches, teacher feature width.
     history = batch["history"]
+    # One Bernoulli decision per sequence; the same IMU-drop mask is used in both passes.
     dropped = torch.rand(len(history), device=device) < t.imu_dropout
+    # These denominators count valid frames/targets, after spatial-feature means.
     tf_count, roll_count = batch["tf_mask"].sum(), batch["target_mask"].sum()
     if tf_count == 0 or roll_count == 0:
         raise ValueError("batch has no valid supervised transitions")
     with precision(device, t.bf16):
         prediction, tf_cache = model(history, batch["short"], batch["long"], batch["eligible"], dropped,
                                      cache_limit=history.shape[1])
+        # TF predicts the next visual feature at each context position; rollout is scored separately below.
         tf_loss = masked_l1_sum(prediction, batch["tf_targets"], batch["tf_mask"]) / tf_count
         weighted_tf = t.tf_weight * tf_loss
     weighted_tf.backward()
@@ -65,6 +87,7 @@ def train_microbatch(model, batch, config, device, boundary_hook=None):
     del prediction, tf_cache, tf_loss, weighted_tf
 
     h = config.data.horizon
+    # Each history block contributes grid² visual tokens plus two IMU slots.
     history_tokens = history.shape[1] * (config.model.grid ** 2 + 2)
     with precision(device, t.bf16):
         prefill, cache = model(history, batch["short"], batch["long"], batch["eligible"], dropped,
@@ -74,6 +97,7 @@ def train_microbatch(model, batch, config, device, boundary_hook=None):
     # Prefill K/V of the history blocks (visual history + IMU tokens). They stay attached until the
     # final segment so that later segments also send gradients into the history and IMU encoder.
     history_kv = [(k, v) for k, v in cache.layers]
+    # Accumulate each TBPTT segment before backward; `roll_value` is the detached log total.
     segment_loss = None
     roll_value = 0.0
     for step in range(h):
@@ -107,10 +131,12 @@ def train_microbatch(model, batch, config, device, boundary_hook=None):
 
 
 def make_optimizer(model, config):
+    """Create AdamW and a linear-warmup/cosine-decay learning-rate scheduler."""
     t = config.train
     optimizer = torch.optim.AdamW(model.parameters(), lr=t.learning_rate, weight_decay=t.weight_decay)
 
     def factor(step):
+        """Return the multiplier applied to the optimizer's base learning rate."""
         if step < t.warmup_steps:
             return (step + 1) / max(1, t.warmup_steps)
         progress = (step - t.warmup_steps) / max(1, t.steps - t.warmup_steps)
@@ -121,6 +147,7 @@ def make_optimizer(model, config):
 
 def save_checkpoint(path, model, optimizer, scheduler, step, config, normalization, teacher, manifest_hash,
                     generator, device="cpu"):
+    """Atomically save training state, data/teacher contracts, and random-generator state."""
     n = np.random.get_state()
     rng = {"python": random.getstate(), "numpy": [n[0], n[1].tolist(), n[2], n[3], n[4]],
            "torch": torch.get_rng_state(), "sampler": generator.get_state()}
@@ -138,6 +165,12 @@ def save_checkpoint(path, model, optimizer, scheduler, step, config, normalizati
 
 def load_checkpoint(path, model, config, manifest_hash, teacher, optimizer=None, scheduler=None,
                     generator=None, device="cpu"):
+    """Load a compatible checkpoint and optionally restore the complete training state.
+
+    Supplying optimizer, scheduler, and sampler generator enables resume; omitting
+    them loads model weights only. Configuration, manifest, teacher, and format
+    mismatches are rejected before training continues.
+    """
     state = torch.load(path, map_location="cpu", weights_only=True)
     if state["format"] != "shakewm.checkpoint.v1" or state["config"] != config.to_dict():
         raise ValueError("checkpoint format/config mismatch; resume must keep the training schedule")
@@ -160,8 +193,10 @@ def load_checkpoint(path, model, config, manifest_hash, teacher, optimizer=None,
 
 @torch.no_grad()
 def evaluate(model, dataset, config, device, batch_size=2, no_imu=False):
+    """Measure fixed-origin open-loop latent L1 and copy-last baseline by horizon."""
     model.eval()
     horizon = config.data.horizon
+    # `sums`/`copies` accumulate model and persistence-baseline errors; `counts` tracks valid targets.
     sums, copies, counts = torch.zeros(horizon), torch.zeros(horizon), torch.zeros(horizon, dtype=torch.long)
     records = []
     for start in range(0, len(dataset), batch_size):

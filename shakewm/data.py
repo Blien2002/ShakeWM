@@ -8,6 +8,12 @@ from .config import digest_json, file_sha256
 
 
 def read_manifest(path):
+    """Load a normalized manifest and validate split isolation and episode paths.
+
+    Returns the parsed manifest and its resolved parent directory. Episode paths
+    must stay under that directory; state IDs, seeds, and physical fingerprints
+    may not cross train/validation/test splits.
+    """
     path = Path(path).resolve()
     manifest = json.loads(path.read_text())
     if manifest.get("schema") != "shakewm.manifest.v1":
@@ -40,6 +46,7 @@ def read_manifest(path):
 
 
 def load_episode(path):
+    """Read one normalized NPZ episode and check its RGB, IMU, and time arrays."""
     with np.load(path, allow_pickle=False) as z:
         e = {k: z[k] for k in z.files}
     required = {"rgb", "rgb_time", "rgb_valid", "imu", "imu_acquisition_time", "imu_delivery_time", "imu_live", "end_time"}
@@ -68,6 +75,7 @@ def load_episode(path):
 
 
 def visual_indices(episode, config):
+    """Select the regular RGB frames used at the model's visual sampling rate."""
     # Require acquisition-grid timestamps; no interpolation that can read future pixels.
     times = episode["rgb_time"]
     if len(times) > 1 and not np.allclose(np.diff(times), 1 / config.acquisition_hz, atol=1e-5, rtol=0):
@@ -76,6 +84,11 @@ def visual_indices(episode, config):
 
 
 def imu_window(episode, cutoff, samples, imu_hz=200):
+    """Build a complete IMU window using only samples delivered by `cutoff`.
+
+    Returns a float32 `[samples, 6]` array and a flag indicating whether the
+    window is complete, recent enough, and uniformly sampled at `imu_hz`.
+    """
     acquisition = episode["imu_acquisition_time"]
     delivery = episode["imu_delivery_time"]
     live = episode["imu_live"]
@@ -94,6 +107,7 @@ def imu_window(episode, cutoff, samples, imu_hz=200):
 
 
 def fit_normalization(manifest_path):
+    """Fit per-channel IMU mean/std from live train-split samples only."""
     manifest, root = read_manifest(manifest_path)
     total = np.zeros(6, np.float64)
     squares = total.copy()
@@ -118,7 +132,19 @@ def fit_normalization(manifest_path):
 
 
 class WindowDataset(Dataset):
+    """Create causal history/target windows for one manifest split.
+
+    Exactly one visual-feature source is required: a verified disk cache or an
+    online encoder. The dataset also records which short/long IMU windows are
+    complete at each historical visual timestamp.
+    """
+
     def __init__(self, manifest_path, split, config, normalization, cache_dir=None, encoder=None):
+        """Validate contracts and index eligible origins without copying RGB/features.
+
+        `normalization` must match the manifest and its train-file hashes. Supply
+        either `cache_dir` or `encoder`; supplying both or neither is an error.
+        """
         self.manifest, self.root = read_manifest(manifest_path)
         self.config, self.normalization = config, normalization
         if normalization["split_hash"] != digest_json(self.manifest):
@@ -148,11 +174,13 @@ class WindowDataset(Dataset):
         self.manifest_hash = digest_json({"manifest": self.manifest, "episode_sha256": sources,
                                           "feature_source": cache if cache else {
                                               "kind": "online", "teacher": self.teacher}})
+        # Coverage counters: eligible episodes, candidate origins, and complete short/long contexts.
         seen = candidates = short_ok = long_ok = 0
         for row in self.manifest["episodes"]:
             if row["split"] != split:
                 continue
             e = load_episode(self.root / row["path"])
+            # `idx` selects model-rate frames; the remaining arrays track frame and IMU validity.
             idx = visual_indices(e, config)
             times = e["rgb_time"][idx]
             valid = e["rgb_valid"][idx] & (times <= float(e["end_time"]) + 1e-9)
@@ -185,6 +213,7 @@ class WindowDataset(Dataset):
                 if not valid[left:origin + 1].all() or not valid[origin + 1:min(len(idx), origin + config.horizon + 1)].any():
                     continue
                 candidates += 1
+                # Eligibility must hold at every history step; V1 additionally needs long IMU.
                 s_ok, l_ok = eligibility[left:origin + 1].all(0)
                 short_ok += int(s_ok); long_ok += int(l_ok and s_ok)
                 if s_ok and (config.eligibility == "v0" or l_ok):
@@ -196,12 +225,25 @@ class WindowDataset(Dataset):
                          "eligibility": config.eligibility}
 
     def __len__(self):
+        """Return the number of eligible episode/origin pairs in this split."""
         return len(self.windows)
 
     def __getitem__(self, index):
+        """Materialize one training example at an episode's fixed forecast origin.
+
+        The returned `history` and `targets` are visual features. `short` and
+        `long` contain normalized `[C, 20, 6]` and `[C, 600, 6]` IMU windows;
+        masks mark eligible IMU inputs and valid future targets. Teacher-forcing
+        targets are the next visual feature at each of the C context positions.
+        """
+        # A dataset index resolves to one episode and its final history-frame index.
         episode_id, origin = self.windows[index]
+        # Stored tuple: manifest row, compact episode arrays, frame indices,
+        # validity/eligibility masks, and optional cached features.
         row, e, idx, valid, eligible, features = self.episodes[episode_id]
+        # `c` and `h` are the configured context and forecast lengths.
         c, h = self.config.context, self.config.horizon
+        # Slice from the first history frame through the available future horizon.
         start, stop = origin - c + 1, min(len(idx), origin + h + 1)
         if features is None:
             with np.load(self.root / row["path"], allow_pickle=False) as raw:
@@ -212,6 +254,7 @@ class WindowDataset(Dataset):
         history = values[:c]
         targets = torch.zeros((h,) + tuple(history.shape[1:]), dtype=history.dtype)
         targets[:stop-origin-1] = values[c:]
+        # `mask[j]` is true only when a real future visual target exists at horizon j.
         mask = torch.zeros(h, dtype=torch.bool)
         mask[:stop-origin-1] = torch.from_numpy(valid[origin + 1:stop].copy())
         # TF uses C true blocks to predict C next frames, with actual context lengths 1..C.
@@ -233,6 +276,11 @@ class WindowDataset(Dataset):
 
 
 def build_cache(manifest_path, output, config, encoder, batch_size=8):
+    """Encode selected RGB frames and stream their frozen features into an indexed cache.
+
+    Cache arrays are FP16 and each index entry binds both the source episode and
+    generated feature file by SHA-256.
+    """
     manifest, root = read_manifest(manifest_path)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
@@ -256,7 +304,11 @@ def build_cache(manifest_path, output, config, encoder, batch_size=8):
 
 
 def create_synthetic(output, seconds=2.0, image_size=32):
-    """Small synthetic fixtures only; state and seed pools are disjoint by construction."""
+    """Create small synthetic RGB/IMU episodes for pipeline checks, never real-data evidence.
+
+    The four episodes have disjoint synthetic state/seed identities and fixed
+    train/validation/test assignments. The output directory must not exist.
+    """
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     manifest = {"schema": "shakewm.manifest.v1", "source_schema": "shakebench.imu_wm.v1",

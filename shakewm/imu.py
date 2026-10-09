@@ -10,7 +10,10 @@ LONG_FIR_TAPS = 31  # Hamming-windowed sinc, 20 Hz cutoff at 200 Hz; causal grou
 
 
 class CausalConv(nn.Conv1d):
+    """1D convolution padded only on the past side, so output time stays causal."""
+
     def forward(self, x):
+        """Convolve `[batch, channels, time]` input without reading future samples."""
         left = (self.kernel_size[0] - 1) * self.dilation[0]
         return super().forward(F.pad(x, (left, 0)))
 
@@ -24,6 +27,7 @@ class AttentionPool(nn.Module):
     """
 
     def __init__(self, length):
+        """Create a learned query and positional embedding for a fixed window length."""
         super().__init__()
         self.length = length
         self.query = nn.Parameter(torch.zeros(1, 1, 128))
@@ -33,6 +37,7 @@ class AttentionPool(nn.Module):
         self.merge = nn.Linear(256, 128)
 
     def forward(self, x):
+        """Pool `[batch, time, 128]` features and fuse attention with the newest step."""
         if x.shape[1] != self.length:
             raise ValueError(f"expected {self.length} time steps, got {x.shape[1]}")
         # Only complete eligible windows reach a branch; no padded sample is pooled.
@@ -42,7 +47,10 @@ class AttentionPool(nn.Module):
 
 
 class ShortEncoder(nn.Module):
+    """Encode the most recent 20 six-channel IMU samples with causal convolutions."""
+
     def __init__(self):
+        """Build the short-window CNN and fixed-length attention pool."""
         super().__init__()
         layers = []
         for cin, cout, dilation in [(6, 64, 1), (64, 128, 2), (128, 128, 4)]:
@@ -51,21 +59,29 @@ class ShortEncoder(nn.Module):
         self.pool = AttentionPool(SHORT_SAMPLES)
 
     def forward(self, x):
+        """Map `[batch, 20, 6]` normalized IMU samples to one 128D vector per window."""
         return self.pool(self.net(x.transpose(1, 2)).transpose(1, 2))
 
 
 class ResidualTCN(nn.Module):
+    """Two-layer causal temporal block with an identity residual connection."""
+
     def __init__(self, dilation):
+        """Build the block using the requested temporal dilation."""
         super().__init__()
         self.net = nn.Sequential(CausalConv(128, 128, 3, dilation=dilation), nn.GELU(),
                                  CausalConv(128, 128, 3, dilation=dilation), nn.GELU())
 
     def forward(self, x):
+        """Return the input plus its causal convolutional residual."""
         return x + self.net(x)
 
 
 class LongEncoder(nn.Module):
+    """Anti-alias and encode the 600-sample IMU history into one 128D vector."""
+
     def __init__(self, taps=LONG_FIR_TAPS):
+        """Build the causal FIR, stride-four decimator, residual TCN, and pool."""
         super().__init__()
         # Hamming-windowed sinc, cutoff 20 Hz at 200 Hz, applied causally before stride-4 decimation.
         # 31 taps keep >0.99 gain up to 9 Hz (all ShakeBench excitation lines) and <0.01 above 30 Hz,
@@ -78,6 +94,7 @@ class LongEncoder(nn.Module):
         self.pool = AttentionPool(LONG_SAMPLES // LONG_STRIDE)
 
     def forward(self, x):
+        """Map `[batch, 600, 6]` normalized samples to one long-history vector."""
         x = x.transpose(1, 2)
         taps = self.fir.shape[-1]
         x = F.conv1d(F.pad(x, (taps - 1, 0)), self.fir.to(x.dtype), groups=6)
@@ -87,7 +104,10 @@ class LongEncoder(nn.Module):
 
 
 class IMUTokens(nn.Module):
+    """Produce the two per-time IMU token slots consumed by the visual predictor."""
+
     def __init__(self, width, mode):
+        """Build both encoders and projections while keeping token parameters mode-invariant."""
         super().__init__()
         self.mode = mode
         # Keep all parameters and token slots identical across V0/V1/RGB-only.
@@ -99,16 +119,23 @@ class IMUTokens(nn.Module):
         nn.init.normal_(self.no_imu, std=0.02)
 
     def forward(self, batch, time, short=None, long=None, eligible=None, dropped=None):
+        """Return `[batch, time, 2, width]` short/long or learned no-IMU tokens.
+
+        `eligible` and `dropped` decide which input windows are encoded. In v0,
+        the long slot is always inactive; in none mode both slots stay no-IMU.
+        """
         out = self.no_imu[None, None].expand(batch, time, -1, -1).clone()
         if short is None or self.mode == "none":
             return out
         if eligible is None:
             raise ValueError("IMU eligibility is required")
+        # `active[b,t,stream]` means that sample b may encode this IMU stream at time t.
         active = eligible.clone()
         if dropped is not None:
             active &= ~dropped[:, None, None]
         if self.mode == "v0":
             active[..., 1] = False
+        # Stream order matches token slots: 0=short history, 1=long history.
         for i, (values, encoder) in enumerate([(short, self.short), (long, self.long)]):
             selected = active[..., i]
             if selected.any():
