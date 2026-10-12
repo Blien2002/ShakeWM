@@ -1,0 +1,54 @@
+{
+  "schema": "shakewm.decoder.config.v1",
+  "architecture": {
+    "kind": "resize_conv",
+    "feature_dim": 768,
+    "grid": 16,
+    "image_size": 256,
+    "entry": 768
+  },
+  "train": {
+    "seed": 7,
+    "sampler_seed": 8,
+    "batch_size": 32,
+    "eval_batch_size": 16,
+    "precision": "float32",
+    "loss": "mse",
+    "peak_lr": 0.0002,
+    "min_lr": 2e-05,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "epsilon": 1e-08,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "warmup_steps": 500,
+    "max_epochs": 20,
+    "early_stop_patience": 5,
+    "min_epochs": 8,
+    "min_relative_improvement": 0.0001,
+    "checkpoint_every_updates": 500
+  },
+  "feature_space": "FP32_nonaffine_token_LN",
+  "roi": [
+    0.25,
+    0.25,
+    0.75,
+    0.75
+  ],
+  "inputs": {
+    "train_manifest": "data/train/manifest.json",
+    "train_cache": "cache/train",
+    "val_manifest": "data/val/manifest.json",
+    "val_cache": "cache/val",
+    "encoder_weights": "weights/vjepa2_1_vitb_dist_vitG_384.pt",
+    "train_frames": "decoder_frames/train",
+    "val_frames": "decoder_frames/val"
+  },
+  "evaluation": {
+    "origin_stride": 10,
+    "video_windows": 3,
+    "wm_checkpoint": null
+  }
+}
