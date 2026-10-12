@@ -15,3 +15,5 @@ cache/
 *.key
 build/
 dist/
+/docs/
+/tests/

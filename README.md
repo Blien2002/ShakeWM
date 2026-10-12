@@ -13,16 +13,16 @@ git clone https://github.com/Blien2002/ShakeWM.git
 cd ShakeWM
 python -m pip install --no-deps --no-build-isolation -e .
 python -c 'import torch, numpy; print(torch.__version__, numpy.__version__)'
-# 缺少测试依赖时：python -m pip install pytest
+# 本地保留的测试需要 pytest；tests/ 和 docs/ 不随仓库发布
 # 仅真实 encoder 需要：python -m pip install 'timm>=1.0,<2'
 ```
 
-依赖为 PyTorch >=2.5、NumPy >=1.24；pytest >=8 用于测试。基线 CPU 验证环境为 Python 3.13 / PyTorch 2.9.1 / NumPy 1.26.4，精确实测版本见 [CPU 报告](docs/CPU_TEST_REPORT.md)。保留 editable checkout，官方 encoder 从仓库内固定来源的最小源码集加载；不支持把单独 wheel 拷走后丢弃 `third_party`。
+依赖为 PyTorch >=2.5、NumPy >=1.24；pytest >=8 用于测试。基线 CPU 验证环境为 Python 3.13 / PyTorch 2.9.1 / NumPy 1.26.4，精确实测版本见 CPU 报告（本地 `docs/CPU_TEST_REPORT.md`，不随仓库发布）。保留 editable checkout，官方 encoder 从仓库内固定来源的最小源码集加载；不支持把单独 wheel 拷走后丢弃 `third_party`。
 
 ## 五分钟 CPU 闭环
 
 ```bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
+# 若本地保留 tests/，可运行：PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
 bash scripts/smoke.sh runs/my-cpu-smoke
 ```
 
@@ -87,7 +87,7 @@ python -m shakewm.cli eval --config configs/v0.json --manifest /mnt/large/imu_wm
 
 ## 数据与评测
 
-[数据接口](docs/DATA_CONTRACT.md) 定义将 `shakebench.imu_wm.v1` 记录转成训练用 NPZ 的边界。当前只提供并验证 normalized NPZ 入口；尚未验证采集端实际文件布局到该格式的转换。不得把现有 smoke 当成正式 0/1350 数据已到齐。
+数据接口（本地 `docs/DATA_CONTRACT.md`，不随仓库发布） 定义将 `shakebench.imu_wm.v1` 记录转成训练用 NPZ 的边界。当前只提供并验证 normalized NPZ 入口；尚未验证采集端实际文件布局到该格式的转换。不得把现有 smoke 当成正式 0/1350 数据已到齐。
 
 先按 state 分组冻结 train/val/test manifest，再切窗口；同 state 所有场景、seed、视角必须同 split，split 间 seed 池不相交。加载器直接拒绝 state/seed 泄漏。均值/方差只用 train live 数据，不做逐窗口归一化；负时间 reset 预填无效。IMU 以实际 delivery≤当前帧时刻裁切，真实采样间隔、数量和最新可用性均校验；长历史不完整不补伪样本。
 
@@ -97,11 +97,74 @@ python -m shakewm.cli eval --config configs/v0.json --manifest /mnt/large/imu_wm
 
 ## 状态与许可
 
-[CPU 测试报告](docs/CPU_TEST_REPORT.md) 与 [上游说明](third_party/NOTICE.md) 列明已验证范围。当前未实现 ROI、物理 probe、slot、pixel decoder、V2 相位分支；这些不属于本轮全图 toy。模型入口没有动作、seed、scenario、GT pose 或未来强制条件。
+CPU 测试报告（本地 `docs/CPU_TEST_REPORT.md`，不随仓库发布） 与 [上游说明](third_party/NOTICE.md) 列明已验证范围。Conv RGB decoder 及其 ROI/相邻帧指标见下文；预测器尚未实现物理 probe、slot 或 V2 相位分支。模型入口没有动作、seed、scenario、GT pose 或未来强制条件。
 
 新代码采用 MIT。上游文件保留原版权及许可证；没有复制其他私有项目，没有上传数据、checkpoint 或凭据。
 
 <!-- native-import-revision -->
 ## Native recording importer and execution handoff
 
-Direct `shakebench.imu_wm.v1` import is now supported. The normalized episode contract remains the model interface. See [native import and CPU evidence](docs/NATIVE_IMPORT.md), [exact commands](docs/EXECUTION_HANDOFF.md), and [official-checkpoint verification status](docs/GPU_HANDOFF.md). The existing recordings provide train-only mock diagnostics; the pretrained encoder numerical gate remains failed and GPU execution is untested.
+Direct `shakebench.imu_wm.v1` import is now supported. The normalized episode contract remains the model interface. See native import and CPU evidence（本地 `docs/NATIVE_IMPORT.md`，不随仓库发布）, exact commands（本地 `docs/EXECUTION_HANDOFF.md`，不随仓库发布）, and official-checkpoint verification status（本地 `docs/GPU_HANDOFF.md`，不随仓库发布）. The existing recordings provide train-only mock diagnostics; the pretrained encoder numerical gate remains failed and GPU execution is untested.
+
+## Conv RGB decoder
+
+`shakewm_decoder` trains a separate, deterministic convolutional decoder from
+frozen visual tokens to RGB. `resize_conv` is the only supported architecture
+and the default in `make_decoder`. Training loads neither the world model nor
+the visual encoder; input tokens are detached and normalized with FP32,
+non-affine per-token layer normalization.
+
+The production contract is row-major `[B, 256, 768]` tokens from a 16×16 grid
+and `[B, 3, 256, 256]` RGB output. Four nearest-neighbor resize/convolution
+stages reconstruct the image. Metrics use unclamped RGB; only video display
+clamps values to [0, 1].
+
+### Prepare and train
+
+Install the package with `pip install -e '.[decoder]'`. Edit
+`configs/decoder_conv.json` to point to your real normalized train360/val45
+manifests and their existing official V-JEPA2.1 indexed caches. Relative paths
+are resolved from the command's working directory. The teacher is a frozen
+ViT encoder; this package contains only a convolutional decoder.
+
+```bash
+python -m shakewm_decoder.data --config configs/decoder_conv.json
+python -m shakewm_decoder.train --config configs/decoder_conv.json \
+  --output decoder_runs/conv --device cuda:0
+```
+
+CPU preparation pairs 10 Hz cache frame `j` with 20 Hz RGB frame `2j`, preserves
+validity/end-time masks, checks camera/teacher/source bindings, and rejects
+overlapping train/validation state IDs. It performs no encoding, cropping or
+data migration. Existing prepared frame indices may be reused only when their
+input identity matches.
+
+The recipe uses FP32 MSE, AdamW, warmup then cosine decay, seed 7, and a unique
+valid-frame permutation per epoch. Only decoder parameters are optimized.
+Validation includes RGB MSE/L1, a predefined rectangular ROI and adjacent
+valid-frame differences. Temporal differences never cross gaps or episodes.
+
+### Resume and evaluate
+
+```bash
+python -m shakewm_decoder.train --config configs/decoder_conv.json \
+  --output decoder_runs/conv --resume decoder_runs/conv/latest.pt --device cuda:0
+python -m shakewm_decoder.evaluate --config configs/decoder_conv.json \
+  --checkpoint decoder_runs/conv/best.pt --output decoder_reports/conv \
+  --device cuda:0
+```
+
+Complete checkpoints contain model, AdamW, RNG, sampler cursor, schedule step
+and split/teacher identities. Resume rejects mismatched inputs, runtime or
+configuration and rejects failure capsules. Nonfinite loss/gradients stop
+before the optimizer update and retain diagnostic evidence; optimizer failures
+also stop and record whether an update had started. `--max-updates` provides
+an explicit bounded run with a complete checkpoint, without changing the recipe.
+
+Standalone GT reconstruction works with the published ShakeWM package.
+Optional `--wm-checkpoint` and `--wm-config` evaluate a frozen C10/H10 predictor
+and generate true RGB, GT reconstruction, prediction reconstruction and
+copy-last reconstruction. This optional path requires the native-v2 checkpoint
+and validation interfaces in the supplied ShakeWM runtime; it fails explicitly
+when those interfaces are absent. It never updates the predictor or encoder
+and accepts only complete native-v2 checkpoints.
