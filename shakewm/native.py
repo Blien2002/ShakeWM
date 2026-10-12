@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import numpy as np
 from .config import digest_json, file_sha256
+from .scenarios import canonical_scenario
 
 CHANNELS = ["specific_force_x", "specific_force_y", "specific_force_z",
             "angular_velocity_x", "angular_velocity_y", "angular_velocity_z"]
@@ -89,7 +90,7 @@ def identity(manifest):
             "original_state_sha256": digest_json(original), "seed": int(seed),
             "asset": original.get("task", {}).get("object_id", "unknown"),
             "basis": original.get("stable_basis", original.get("basis", "unspecified")),
-            "scenario": meta["excitation"].get("mode_params", {}).get("scenario", "unspecified")}
+            "scenario": canonical_scenario(meta["excitation"])}
 
 
 def discover(sources):
